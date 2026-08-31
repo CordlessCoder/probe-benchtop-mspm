@@ -376,9 +376,23 @@ impl Bench {
     }
 
     /// Reset and let the target run.
+    ///
+    /// **The resume is not belt and braces.** `Core::reset` is documented as resetting and then
+    /// continuing, and on an MSPM0L1306 over CMSIS-DAP it does not: the core comes back
+    /// `Halted(External)` and stays there. Measured either side of the call — halted after the
+    /// reset, a symbol frozen across nine seconds, and both moving again the moment `run` was
+    /// issued.
+    ///
+    /// The failure without it is quiet, which is why this is here rather than left to the caller.
+    /// Memory reads keep working on a halted core, so a target that is not executing reports its
+    /// last values rather than an error, and a firmware that has stopped looks like one whose
+    /// numbers happen not to be changing.
     pub fn reset(&mut self) -> Result<(), Error> {
         let mut core = self.session.core(0)?;
         core.reset()?;
+        if core.status()?.is_halted() {
+            core.run()?;
+        }
         Ok(())
     }
 
