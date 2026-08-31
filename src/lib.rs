@@ -184,6 +184,7 @@ pub struct Bench {
     session: Session,
     symbols: Symbols,
     elf: PathBuf,
+    resume_on_drop: bool,
 }
 
 impl Bench {
@@ -249,6 +250,7 @@ impl Bench {
             session,
             symbols,
             elf: elf.to_owned(),
+            resume_on_drop: true,
         };
 
         {
@@ -386,6 +388,53 @@ impl Bench {
     /// The session, for anything this does not wrap yet.
     pub fn session(&mut self) -> &mut Session {
         &mut self.session
+    }
+
+    /// Leave the core halted when this is dropped, instead of running.
+    ///
+    /// For a caller that halted the core deliberately and wants it to stay that way — reading a
+    /// consistent snapshot of something the firmware is writing, or handing the part to a debugger.
+    pub fn leave_halted(&mut self) {
+        self.resume_on_drop = false;
+    }
+}
+
+/// Resume before detaching.
+///
+/// **Necessary and, on MSPM0, not sufficient — which is worth knowing before relying on it.**
+/// Attaching leaves the core halted, so a session that never resumes and then exits leaves it
+/// halted too. This covers that.
+///
+/// It does not cover everything. Measured on an L1306: a counter the firmware bumps every few
+/// seconds reads zero immediately after a tool that resumed the core exits, and zero again twelve
+/// seconds later — so the part is not running between sessions even with this in place. It runs
+/// perfectly *during* one, which is what a sweep needs, so the effect is on walking away rather
+/// than on measuring.
+///
+/// The cause is not established. probe-rs's own teardown is not an obvious candidate: `Session`'s
+/// drop clears breakpoints and calls `debug_core_stop`, and that sequence tears debug down and
+/// hands low-power control back without resetting. **Do not attach a story to it.** The workaround
+/// is one command — `probe-rs reset` — and the question is written down rather than guessed at.
+///
+/// Best-effort, because a destructor has nowhere to return an error to. A failure here means the
+/// session was already broken, which the caller has heard about by another route.
+impl Drop for Bench {
+    fn drop(&mut self) {
+        if !self.resume_on_drop {
+            return;
+        }
+        let resumed = self
+            .session
+            .core(0)
+            .and_then(|mut core| {
+                if core.status()?.is_halted() {
+                    core.run()?;
+                }
+                Ok(())
+            });
+        if let Err(e) = resumed {
+            tracing::warn!("could not resume the core on detach, so the board is stopped: {e}");
+        }
     }
 }
 
