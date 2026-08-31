@@ -1,0 +1,32 @@
+[package]
+name = "probe-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+# Driving a Cortex-M board over SWD from a program rather than a shell: attach, reset, prove the
+# core is running, resolve a symbol out of the ELF, and read or write it while the core runs.
+#
+# **It knows nothing about any particular firmware.** It is handed an ELF path and a symbol name.
+# Everything product-specific — which symbols exist, what they mean, what a sweep of one is for —
+# belongs in the caller. That boundary is why this crate lives outside any firmware repository
+# rather than inside one, and it is what makes it usable by more than one project.
+#
+# No GUI dependency, ever. A CI runner links this directly.
+
+[dependencies]
+# The fork, pinned. Two of its commits are load-bearing on MSPM0 — resetting through SYSCTL when the
+# reset catch is armed, and recovering an inaccessible part through the boot ROM mailbox — and
+# without them a locked core is unreachable rather than merely stopped.
+#
+# Pinned to a rev on `origin`, not to the local checkout by path: a path dependency would compile
+# whatever is in someone's working tree, which is not a thing two machines can agree on.
+probe-rs = { git = "https://github.com/CordlessCoder/probe-rs", rev = "473c31dd8" }
+
+# The ELF's symbol table, read directly. probe-rs parses ELFs for flashing and for defmt, but it
+# does not expose a symbol lookup, and this is the whole schema — see the crate docs.
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+
+thiserror = "2"
+tracing = "0.1"
