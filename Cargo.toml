@@ -28,5 +28,11 @@ probe-rs = { git = "https://github.com/CordlessCoder/probe-rs", rev = "473c31dd8
 # does not expose a symbol lookup, and this is the whole schema — see the crate docs.
 object = { version = "0.36", default-features = false, features = ["read", "std"] }
 
+# The decode belongs here rather than in a front end: `Frame<'t>` borrows the string table and
+# cannot cross a channel, so something has to own the conversion, and a GUI that saw
+# `defmt-decoder` at all would be able to throw the structure away by accident.
+defmt-decoder = "1.0"
+
+anyhow = "1"
 thiserror = "2"
 tracing = "0.1"

@@ -29,6 +29,7 @@ use probe_rs::{MemoryInterface, Permissions, Session};
 
 pub mod embassy_mspm0;
 mod image;
+pub mod log;
 mod symbols;
 mod value;
 
@@ -120,6 +121,32 @@ pub enum Error {
 
     #[error("{path} has no loadable segments")]
     NothingLoadable { path: PathBuf },
+
+    #[error("{path} declares a defmt version this decoder does not speak")]
+    DefmtTable {
+        path: PathBuf,
+        #[source]
+        source: anyhow::Error,
+    },
+
+    /// No usable RTT control block.
+    ///
+    /// Usually the image has no RTT in it — a production build — rather than anything being wrong.
+    #[error("no RTT: {detail}")]
+    NoRtt { detail: String },
+
+    #[error("this image has {len} RTT up-channel(s), so there is no channel {index}")]
+    NoSuchChannel { index: usize, len: usize },
+
+    /// The defmt stream is out of step with the ELF.
+    ///
+    /// Almost always a stale ELF rather than corruption, and the image check at attach is what
+    /// normally catches that first.
+    #[error("the defmt stream did not decode against this ELF")]
+    MalformedDefmt,
+
+    #[error(transparent)]
+    Rtt(#[from] probe_rs::rtt::Error),
 
     #[error(transparent)]
     Probe(#[from] probe_rs::Error),
@@ -404,6 +431,16 @@ impl Bench {
     pub fn read_u32(&mut self, address: u64) -> Result<u32, Error> {
         let mut core = self.session.core(0)?;
         Ok(core.read_word_32(address)?)
+    }
+
+    /// Follow this target's log.
+    ///
+    /// Here rather than on the reader because the control block's address and the session both
+    /// come out of this struct, and a caller cannot borrow one while passing the other.
+    pub fn logs(&mut self, channel: usize) -> Result<log::Reader, Error> {
+        let elf = self.elf.clone();
+        let region = log::region(&self.symbols)?;
+        log::Reader::attach(&mut self.session, region, &elf, channel)
     }
 
     /// The session, for anything this does not wrap yet.
