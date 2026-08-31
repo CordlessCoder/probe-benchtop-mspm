@@ -57,6 +57,29 @@
 //! answer comes out backwards, because the bits latch and nothing had ever cleared them, so
 //! everything reads set and "was it already set" answers a different question.
 
+//! # Driving it as a regression test
+//!
+//! To prove a firmware's receive path actually collects a word rather than merely compiling:
+//!
+//! 1. Attach and **resume** — attaching leaves the core halted.
+//! 2. Clear the CPU-side latched status: write `0xF` to `CPU_INT.ICLR`,
+//!    `0x400C_7000 + 0x1020 + 0x28`. Read `RIS` at `+0x10` and expect `0`.
+//! 3. Read [`Mailbox::idr`]. A zero means the port is not there and nothing below is meaningful.
+//! 4. Drain: if [`Mailbox::try_receive`] returns a word, discard it, so the state is known.
+//! 5. [`Mailbox::send`] a value the firmware could not produce by accident.
+//! 6. Assert [`Mailbox::send_pending`] is now true. If it is not, the write did not land and the
+//!    rest proves nothing.
+//! 7. **Poll `send_pending` until it goes false.** That transition *is* the CPU having read
+//!    `TXDATA`, and it is the assertion the test exists for. If the firmware's receive never
+//!    resolves, this stays true until the deadline and the failure names itself.
+//!
+//! **Run it once against a firmware that never receives, and require step 7 to time out.** A test
+//! that only ever sees the passing case cannot tell a working channel from a flag that clears on
+//! its own — which is exactly how a send-side test can pass while nothing collects the word.
+//!
+//! All of it in **one process**: two cannot share a probe, and detaching resets the part, so
+//! watching a target log while another tool writes the word is not available.
+
 use probe_rs::architecture::arm::FullyQualifiedApAddress;
 
 use crate::{Bench, Error};
