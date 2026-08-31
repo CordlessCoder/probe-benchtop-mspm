@@ -27,6 +27,7 @@ use probe_rs::probe::DebugProbeSelector;
 use probe_rs::probe::list::Lister;
 use probe_rs::{MemoryInterface, Permissions, Session};
 
+pub mod embassy_mspm0;
 mod image;
 mod symbols;
 mod value;
@@ -377,6 +378,26 @@ impl Bench {
         check(name, symbol, T::WIDTH, T::NAME)?;
         let mut core = self.session.core(0)?;
         value.write(&mut core, symbol.address)
+    }
+
+    /// Read a symbol whose width is not one of the scalar types — an array, or a struct.
+    ///
+    /// No width check, because there is no type to check against. The ELF's recorded size is what
+    /// a caller should ask for, and [`Symbols::get`] is how to find it.
+    pub fn peek_bytes(&mut self, name: &str, len: usize) -> Result<Vec<u8>, Error> {
+        let symbol = self.symbols.get(name)?;
+        let mut out = vec![0u8; len];
+        let mut core = self.session.core(0)?;
+        core.read(symbol.address, &mut out)?;
+        Ok(out)
+    }
+
+    /// Whether a symbol is in this image at all.
+    ///
+    /// For state a HAL exports only under some feature, where absent and zero mean different
+    /// things and reporting the second for the first is a wrong answer rather than a missing one.
+    pub fn has(&self, name: &str) -> bool {
+        self.symbols.get(name).is_ok()
     }
 
     /// Read a word at a raw address, for a peripheral register rather than a symbol.
