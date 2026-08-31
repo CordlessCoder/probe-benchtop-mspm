@@ -29,6 +29,7 @@ use probe_rs::{MemoryInterface, Permissions, Session};
 
 pub mod embassy_mspm0;
 mod image;
+pub mod mspm0_gpio;
 pub mod log;
 mod symbols;
 mod value;
@@ -144,6 +145,16 @@ pub enum Error {
     /// normally catches that first.
     #[error("the defmt stream did not decode against this ELF")]
     MalformedDefmt,
+
+    /// Driving a debug pin.
+    ///
+    /// The one thing refused outright: the command would travel over the pin it reconfigures, so
+    /// nothing could undo it. Everything else a bench asks for goes through.
+    #[error(
+        "PA{pin} is SWDIO or SWCLK. Driving it would end this session over the pin it reconfigures, \
+         and no further command could undo it — only a power cycle."
+    )]
+    DebugPin { pin: u8 },
 
     #[error(transparent)]
     Rtt(#[from] probe_rs::rtt::Error),
@@ -431,6 +442,16 @@ impl Bench {
     pub fn read_u32(&mut self, address: u64) -> Result<u32, Error> {
         let mut core = self.session.core(0)?;
         Ok(core.read_word_32(address)?)
+    }
+
+    /// Write a word at a raw address.
+    ///
+    /// **No read-back here, unlike [`Bench::poke`].** A peripheral register is not memory: many are
+    /// write-one-to-set or write-one-to-clear, and reading one back after writing it compares two
+    /// different things and reports a failure that is not one.
+    pub fn write_u32(&mut self, address: u64, value: u32) -> Result<(), Error> {
+        let mut core = self.session.core(0)?;
+        Ok(core.write_word_32(address, value)?)
     }
 
     /// Follow this target's log.
