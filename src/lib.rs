@@ -30,6 +30,7 @@ use probe_rs::{MemoryInterface, Permissions, Session};
 pub mod embassy_mspm0;
 mod image;
 pub mod mspm0_gpio;
+pub mod mspm0_mailbox;
 pub mod log;
 mod symbols;
 mod value;
@@ -155,6 +156,15 @@ pub enum Error {
          and no further command could undo it — only a power cycle."
     )]
     DebugPin { pin: u8 },
+
+    /// A word is already waiting for the CPU.
+    ///
+    /// The mailbox is one word deep with no queue, so sending over a pending word would lose it.
+    #[error("a word is already waiting for the target to collect")]
+    MailboxBusy,
+
+    #[error(transparent)]
+    Arm(#[from] probe_rs::architecture::arm::ArmError),
 
     #[error(transparent)]
     Rtt(#[from] probe_rs::rtt::Error),
