@@ -163,6 +163,19 @@ pub enum Error {
     #[error("a word is already waiting for the target to collect")]
     MailboxBusy,
 
+    /// Programming the part.
+    ///
+    /// **The image on the part is not the ELF any more, whatever this says.** A failure here can
+    /// land anywhere between "nothing was erased" and "half the sectors are written", so a caller
+    /// that carries on reading symbols is reading an image that does not exist. Re-program, or
+    /// re-attach; do not continue.
+    #[error("cannot program {path}")]
+    Flash {
+        path: PathBuf,
+        #[source]
+        source: Box<probe_rs::flashing::FileDownloadError>,
+    },
+
     #[error(transparent)]
     Arm(#[from] probe_rs::architecture::arm::ArmError),
 
@@ -394,6 +407,57 @@ impl Bench {
             core.run()?;
         }
         Ok(())
+    }
+
+    /// Program an ELF onto the part, adopt it as this session's image, and let it run.
+    ///
+    /// **This is the operation that makes [`Verify`] unnecessary rather than the one it guards
+    /// against.** Everything else here reads a part it did not put there, so the ELF and the image
+    /// can disagree. After this they agree by construction, and the new symbol table replaces the
+    /// old one — which is the whole of what a caller has to handle, since every name it held may
+    /// have moved, changed width, or gone.
+    ///
+    /// # The symbol table is read before anything is erased
+    ///
+    /// A path that does not exist, or an ELF that does not parse, is then an error against a part
+    /// that is still running. Discovering it after the erase would leave a blank part and a session
+    /// with nothing to say about it.
+    ///
+    /// # What is not erased
+    ///
+    /// Flash erases by sector, and only sectors the image writes into are erased. A sector the ELF
+    /// puts nothing in keeps what it held, which is what makes it safe to re-program a part whose
+    /// flash also holds data written at run time — **provided that data does not share a sector
+    /// with anything loadable.** Sharing one means the whole sector goes.
+    ///
+    /// Unwritten bytes *within* a sector that is erased are not restored, matching `probe-rs
+    /// download` without `--restore-unwritten`, so this and the command line put the same thing on
+    /// the part.
+    ///
+    /// # Cost
+    ///
+    /// Every written byte is read back and compared before this returns. A wrong image is otherwise
+    /// silent for as long as it takes somebody to distrust a reading, and the read-back is a
+    /// fraction of a second at the size a microcontroller image runs to.
+    pub fn program(&mut self, elf: &Path) -> Result<(), Error> {
+        let symbols = Symbols::load(elf)?;
+
+        let mut options = probe_rs::flashing::DownloadOptions::default();
+        options.verify = true;
+        let format = probe_rs::flashing::ElfLoader(probe_rs::flashing::ElfOptions::default());
+
+        probe_rs::flashing::download_file_with_options(&mut self.session, elf, format, options)
+            .map_err(|source| Error::Flash {
+                path: elf.to_owned(),
+                source: Box::new(source),
+            })?;
+
+        // Adopted only once the write succeeded. On the error path the old ELF stays, which is
+        // wrong about the part — but so is every other answer, and the error says so.
+        self.symbols = symbols;
+        self.elf = elf.to_owned();
+
+        self.reset()
     }
 
     /// Read one value by symbol name, while the core runs.
