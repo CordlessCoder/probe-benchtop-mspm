@@ -4,11 +4,21 @@
 //! never be driven. Every address and field position below is from the metapac the HAL itself uses,
 //! and the sequence is the one the HAL's own `set_as_output` performs.
 //!
-//! # It needs nothing from the firmware
+//! # It needs nothing from the firmware, and that took a correction
 //!
-//! The pin is muxed, enabled and driven by writing the peripheral's registers over SWD while the
-//! core runs. So it works on a production image, on a bring-up image, and on an image built before
-//! anyone wanted this.
+//! The pin is muxed, enabled and driven by writing the peripheral's registers over SWD. So it works
+//! on a production image, on a bring-up image, and on an image built before anyone wanted this.
+//!
+//! **It did not work with no image at all, and said nothing about it.** The bank's `PWREN` gates
+//! every register below it, and an application's `init` is what sets it — so on a part halted at the
+//! reset vector, or a blank one, every write here went to an isolated peripheral and was dropped
+//! while the call returned `Ok`. Measured: `PWREN` reads `1` with the image running and `0` at the
+//! reset vector, and the same drive takes in the first case and vanishes in the second.
+//!
+//! [`power_on`] closes it, and every entry point calls it. **Enabling an unpowered bank cannot
+//! disturb an owner, because an unpowered bank has no owner** — which is what makes doing it
+//! unconditionally safe rather than a thing to ask about. The bank's reset is *not* asserted: that
+//! would clear the pin state of an application that is using it, and `PWREN` alone is enough.
 //!
 //! # And the firmware does not know it happened
 //!
@@ -38,6 +48,13 @@ const DOE31_0: u64 = 0x12C0;
 const DOESET31_0: u64 = 0x12D0;
 const DOECLR31_0: u64 = 0x12E0;
 const DIN31_0: u64 = 0x1380;
+
+/// `GPIOA.GPRCM.PWREN`, from the metapac: the block is at `+0x800` and `PWREN` at `+0x00`.
+const PWREN: u64 = 0x0800;
+/// `PWREN.ENABLE`, bit 0.
+const PWREN_ENABLE: u32 = 1;
+/// `PWREN.KEY`, `0x26` in bits 31:24. A write without it is ignored.
+const PWREN_KEY: u32 = 0x26 << 24;
 
 /// `PINCM.PF` selecting the GPIO function. 1 on every MSPM0.
 const GPIO_PF: u32 = 1;
@@ -124,6 +141,7 @@ impl State {
 
 /// Read one pin without disturbing it.
 pub fn read(bench: &mut Bench, pin: Pin) -> Result<State, Error> {
+    power_on(bench)?;
     let pincm = bench.read_u32(pin.pincm())?;
     let doe = bench.read_u32(GPIOA + DOE31_0)?;
     let dout = bench.read_u32(GPIOA + DOUT31_0)?;
@@ -143,7 +161,30 @@ pub fn read(bench: &mut Bench, pin: Pin) -> Result<State, Error> {
 ///
 /// Four register reads rather than four per pin, which is what makes a pin table refreshable at a
 /// useful rate over SWD.
+/// Power the GPIO bank if it is not already, and say whether that had to be done.
+///
+/// **Every entry point here calls this first**, because the failure it prevents is silent: an
+/// unpowered bank swallows writes and reports nothing, so a drive appears to succeed and the pin
+/// does not move.
+///
+/// Safe to call unconditionally. A bank that is powered is left alone, and one that is not has no
+/// application using it — an application that had reached its pins would have powered it.
+///
+/// The bank's reset is deliberately not asserted. `PWREN` alone is enough, measured, and asserting
+/// reset would clear the pin state of a firmware that owns pins in this bank.
+pub fn power_on(bench: &mut Bench) -> Result<bool, Error> {
+    if bench.read_u32(GPIOA + PWREN)? & PWREN_ENABLE != 0 {
+        return Ok(false);
+    }
+    bench.write_u32(GPIOA + PWREN, PWREN_KEY | PWREN_ENABLE)?;
+    // The registers behind `PWREN` stay isolated for a few ULPCLK cycles and a write that lands in
+    // that window is dropped — which is the same silent failure one layer down.
+    std::thread::sleep(std::time::Duration::from_millis(1));
+    Ok(true)
+}
+
 pub fn read_all(bench: &mut Bench) -> Result<Vec<(Pin, State)>, Error> {
+    power_on(bench)?;
     let doe = bench.read_u32(GPIOA + DOE31_0)?;
     let dout = bench.read_u32(GPIOA + DOUT31_0)?;
     let din = bench.read_u32(GPIOA + DIN31_0)?;
@@ -181,6 +222,7 @@ pub fn drive(bench: &mut Bench, pin: Pin, level: bool) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
+    power_on(bench)?;
     let was = read(bench, pin)?;
 
     let set = if level { DOUTSET31_0 } else { DOUTCLR31_0 };
@@ -198,7 +240,8 @@ pub fn drive(bench: &mut Bench, pin: Pin, level: bool) -> Result<State, Error> {
 /// The output driver goes off before the mux is restored, for the same reason it went on last.
 pub fn restore(bench: &mut Bench, pin: Pin, was: &State) -> Result<(), Error> {
     if !was.driving {
-        bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
+        power_on(bench)?;
+    bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
     }
     bench.write_u32(pin.pincm(), was.pincm)?;
     if was.driving {
@@ -214,6 +257,7 @@ pub fn release(bench: &mut Bench, pin: Pin) -> Result<(), Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
+    power_on(bench)?;
     bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
     // `PC` clear is `PC_UNCONNECTED`, the state TI's own naming calls it, and it is where an
     // analog net rests in. Pulls are cleared with it so nothing is left holding the node.
