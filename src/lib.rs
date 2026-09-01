@@ -242,6 +242,103 @@ pub struct Attach {
     pub verify: Verify,
 }
 
+/// Which part of a flash a [`Progress`] is about.
+///
+/// **Not `probe_rs`'s own operation type.** That one carries no `PartialEq`, so a caller cannot ask
+/// whether the phase has changed, and a probe-rs bump adding a variant would break every match on
+/// it. Mapping once here is the whole of what a front end needs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Phase {
+    /// Reading back what an erased sector held, so bytes the image does not write survive it.
+    Fill,
+    Erase,
+    Program,
+    /// Reading back what was written and comparing it. Only when `verify` is set, which
+    /// [`Bench::program`] sets.
+    Verify,
+    /// Writing straight to RAM, which is the flash algorithm being loaded rather than the image.
+    Ram,
+}
+
+impl Phase {
+    /// How many there are, for a table indexed by [`Phase::index`].
+    const COUNT: usize = 5;
+
+    /// A slot in such a table.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::Fill => 0,
+            Self::Erase => 1,
+            Self::Program => 2,
+            Self::Verify => 3,
+            Self::Ram => 4,
+        }
+    }
+
+    /// What to call it, in the lower case a status line wants.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Fill => "filling",
+            Self::Erase => "erasing",
+            Self::Program => "programming",
+            Self::Verify => "verifying",
+            Self::Ram => "loading the algorithm",
+        }
+    }
+}
+
+impl From<probe_rs::flashing::ProgressOperation> for Phase {
+    fn from(operation: probe_rs::flashing::ProgressOperation) -> Self {
+        use probe_rs::flashing::ProgressOperation as O;
+        match operation {
+            O::Fill => Self::Fill,
+            O::Erase => Self::Erase,
+            O::Program => Self::Program,
+            O::Verify => Self::Verify,
+            O::Ram => Self::Ram,
+        }
+    }
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// How far through one phase of a flash it is.
+///
+/// See [`Bench::program_watching`], and note that the phases are not one bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Progress {
+    pub phase: Phase,
+    /// Bytes this phase has covered.
+    pub done: u64,
+    /// What this phase covers in total, where the algorithm published one.
+    ///
+    /// `None` is a phase of indeterminate size, and a front end showing a bar for one is showing a
+    /// number it made up.
+    pub total: Option<u64>,
+}
+
+impl Progress {
+    /// How far through this phase is, in `0.0..=1.0`.
+    ///
+    /// `None` where the total is unknown, and `1.0` where it is zero — a phase with nothing to do
+    /// is finished rather than at the start of itself.
+    #[must_use]
+    pub fn fraction(&self) -> Option<f32> {
+        let total = self.total?;
+        if total == 0 {
+            return Some(1.0);
+        }
+        #[expect(clippy::cast_precision_loss, reason = "a flash image is far short of a float's exact range")]
+        Some((self.done.min(total) as f32) / (total as f32))
+    }
+}
+
 /// An attached board, with its ELF.
 pub struct Bench {
     session: Session,
@@ -456,10 +553,60 @@ impl Bench {
     /// silent for as long as it takes somebody to distrust a reading, and the read-back is a
     /// fraction of a second at the size a microcontroller image runs to.
     pub fn program(&mut self, elf: &Path) -> Result<(), Error> {
+        self.program_watching(elf, |_| {})
+    }
+
+    /// [`Bench::program`], reporting how far through it is.
+    ///
+    /// `watch` is called on this thread, from inside the flash, so a caller that owns the probe on
+    /// a worker thread can forward each report to an interface that is still repainting. It is the
+    /// only thing that can: the erase and the read-back are one blocking call, and a front end with
+    /// no reports has nothing to show for several seconds but a disabled button.
+    ///
+    /// # The phases are not one bar
+    ///
+    /// A flash erases, programs, and then reads back what it wrote, and the algorithm gives each
+    /// its own total. [`Progress::fraction`] is therefore the fraction of the *current* phase, and
+    /// a caller that wants one number for the whole operation is choosing weights the algorithm
+    /// did not supply.
+    pub fn program_watching(
+        &mut self,
+        elf: &Path,
+        mut watch: impl FnMut(Progress),
+    ) -> Result<(), Error> {
         let symbols = Symbols::load(elf)?;
+
+        // Filled from the `AddProgressBar` events, which all arrive before any work starts.
+        let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
+        let mut done = 0u64;
 
         let mut options = probe_rs::flashing::DownloadOptions::default();
         options.verify = true;
+        options.progress = probe_rs::flashing::FlashProgress::new(move |event| {
+            use probe_rs::flashing::ProgressEvent as E;
+            match event {
+                E::AddProgressBar { operation, total } => totals[Phase::from(operation).index()] = total,
+                E::Started(operation) => {
+                    done = 0;
+                    let phase = Phase::from(operation);
+                    watch(Progress { phase, done, total: totals[phase.index()] });
+                }
+                E::Progress { operation, size, .. } => {
+                    done = done.saturating_add(size);
+                    let phase = Phase::from(operation);
+                    watch(Progress { phase, done, total: totals[phase.index()] });
+                }
+                // **A phase that ends is reported at its total rather than at what was counted.**
+                // The algorithm rounds a page to its own granularity, so the sum of the reports can
+                // fall short of the total it published and leave a bar that never fills.
+                E::Finished(operation) => {
+                    let phase = Phase::from(operation);
+                    let total = totals[phase.index()];
+                    watch(Progress { phase, done: total.unwrap_or(done), total });
+                }
+                E::FlashLayoutReady { .. } | E::Failed(_) | E::DiagnosticMessage { .. } => {}
+            }
+        });
         let format = probe_rs::flashing::ElfLoader(probe_rs::flashing::ElfOptions::default());
 
         probe_rs::flashing::download_file_with_options(&mut self.session, elf, format, options)
@@ -641,4 +788,44 @@ fn check(name: &str, symbol: Symbol, wanted: u64, type_name: &'static str) -> Re
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Phase, Progress};
+
+    fn at(done: u64, total: Option<u64>) -> Progress {
+        Progress { phase: Phase::Program, done, total }
+    }
+
+    #[test]
+    fn a_fraction_needs_a_total() {
+        assert_eq!(at(512, None).fraction(), None);
+        assert_eq!(at(512, Some(1024)).fraction(), Some(0.5));
+    }
+
+    /// A phase with nothing to do is finished, not at the start of itself. A bar rendered from
+    /// zero over zero would sit empty for the whole of an operation that never runs.
+    #[test]
+    fn an_empty_phase_is_complete() {
+        assert_eq!(at(0, Some(0)).fraction(), Some(1.0));
+    }
+
+    /// The algorithm rounds a page to its own granularity, so the reports can add up past the
+    /// total it published. A bar is clamped rather than allowed past its end.
+    #[test]
+    fn overshooting_the_total_does_not_overshoot_the_bar() {
+        assert_eq!(at(2048, Some(1024)).fraction(), Some(1.0));
+    }
+
+    #[test]
+    fn every_phase_has_its_own_slot() {
+        let all = [Phase::Fill, Phase::Erase, Phase::Program, Phase::Verify, Phase::Ram];
+        assert_eq!(all.len(), Phase::COUNT);
+        let mut seen: Vec<usize> = all.iter().map(|p| p.index()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), Phase::COUNT, "two phases share a slot, so one overwrites the other's total");
+        assert!(seen.iter().all(|&i| i < Phase::COUNT), "a slot is outside the table");
+    }
 }
