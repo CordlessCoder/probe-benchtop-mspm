@@ -26,7 +26,7 @@ probe-rs = { git = "https://github.com/CordlessCoder/probe-rs", rev = "473c31dd8
 
 # The ELF's symbol table, read directly. probe-rs parses ELFs for flashing and for defmt, but it
 # does not expose a symbol lookup, and this is the whole schema — see the crate docs.
-object = { version = "0.36", default-features = false, features = ["read", "std"] }
+object = { version = "0.40", default-features = false, features = ["read", "std"] }
 
 # The decode belongs here rather than in a front end: `Frame<'t>` borrows the string table and
 # cannot cross a channel, so something has to own the conversion, and a GUI that saw
