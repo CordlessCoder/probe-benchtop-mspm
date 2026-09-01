@@ -252,6 +252,20 @@ pub struct Attach {
     ///
     /// **On by default because the failure it catches is silent.** See [`Verify`].
     pub verify: Verify,
+    /// Let the attach recover a part whose access port has stopped answering, by erasing it.
+    ///
+    /// **Off by default, and the default is the surprising one to live with.** A part with a blank
+    /// or faulting MAIN takes its access port down, and the only way back in is the boot ROM's mass
+    /// erase — which probe-rs will run during the attach, but only with this. Without it, attaching
+    /// to a part you have just erased fails with a permissions error rather than recovering.
+    ///
+    /// It is still off by default because the recovery is silent and destroys whatever is on the
+    /// part. Set it where the caller has already decided that: after an erase it asked for, or on a
+    /// bring-up flow whose whole purpose is to get a blank part running.
+    ///
+    /// Reaches only the path taken when the access port is already dead. An ordinary attach to a
+    /// working part never gets there, so this changes nothing for one.
+    pub allow_erase_all: bool,
 }
 
 /// Which part of a flash a [`Progress`] is about.
@@ -506,7 +520,14 @@ impl Bench {
         }
 
         let session = probe
-            .attach(attach.chip.clone(), Permissions::new())
+            .attach(attach.chip.clone(), {
+                let permissions = Permissions::new();
+                if attach.allow_erase_all {
+                    permissions.allow_erase_all()
+                } else {
+                    permissions
+                }
+            })
             .map_err(|source| Error::Attach {
                 chip: Some(attach.chip.clone()),
                 source,
