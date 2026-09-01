@@ -766,6 +766,65 @@ impl Bench {
         })
     }
 
+    /// Program bytes at an address, erasing only the sectors they land in.
+    ///
+    /// # What this is for, and what it is not
+    ///
+    /// **Placing data that is not an image**: a calibration record, a configuration block, anything
+    /// a product keeps in flash and a bench has reason to set. [`Bench::program`] writes an ELF and
+    /// adopts it as this session's; this writes bytes and adopts nothing, because bytes are not a
+    /// symbol table.
+    ///
+    /// # Sectors, not bytes
+    ///
+    /// Flash erases by sector. `keep_unwritten_bytes` is set, so the sectors this touches are read
+    /// back first and the bytes it does not write are put back as they were — which is what makes
+    /// it safe to place a few words in a sector that holds something else. **It is not atomic**: a
+    /// failure between the erase and the restore leaves that sector partly written.
+    /// A caller that cares should check.
+    ///
+    /// # The ELF still describes what it described
+    ///
+    /// Unlike programming an image, this changes no symbol. It can, however, change what a symbol
+    /// *reads* — which is the point, and worth saying because nothing about the session will look
+    /// different afterwards.
+    pub fn write_flash(&mut self, address: u64, bytes: &[u8]) -> Result<(), Error> {
+        self.write_flash_watching(address, bytes, |_| {})
+    }
+
+    /// [`Bench::write_flash`], reporting how far through it is.
+    pub fn write_flash_watching(
+        &mut self,
+        address: u64,
+        bytes: &[u8],
+        mut watch: impl FnMut(Progress),
+    ) -> Result<(), Error> {
+        let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
+        let mut done = 0u64;
+
+        let mut loader = probe_rs::flashing::FlashLoader::new(
+            self.session.target().memory_map.clone(),
+            probe_rs::config::TargetDescriptionSource::BuiltIn,
+        );
+        loader
+            .add_data(address, bytes)
+            .map_err(|source| Error::Erase { source: Box::new(source) })?;
+
+        let mut options = probe_rs::flashing::DownloadOptions::default();
+        options.verify = true;
+        // **The whole reason this can place a few words.** Without it the sectors these bytes land
+        // in are erased and only the written part comes back, so a neighbour sharing a sector is
+        // lost to a write that never named it.
+        options.keep_unwritten_bytes = true;
+        options.progress = probe_rs::flashing::FlashProgress::new(move |event| {
+            report(event, &mut totals, &mut done, &mut watch);
+        });
+
+        loader
+            .commit(&mut self.session, options)
+            .map_err(|source| Error::Erase { source: Box::new(source) })
+    }
+
     /// Read one value by symbol name, while the core runs.
     ///
     /// The ELF's recorded width is checked against `T` first, so asking for the wrong type is an
