@@ -21,6 +21,7 @@
 //! A CI runner links this directly. Anything that needs a window belongs above it.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub use probe_rs::CoreStatus;
 use probe_rs::probe::DebugProbeSelector;
@@ -406,6 +407,21 @@ impl Bench {
         if core.status()?.is_halted() {
             core.run()?;
         }
+        Ok(())
+    }
+
+    /// Reset and stop at the reset vector, so the caller can write memory before anything runs.
+    ///
+    /// **The window this opens is narrower than it looks.** The core is halted at the reset vector,
+    /// which is *before* the startup code — so `.data` has not been copied from flash and `.bss`
+    /// has not been zeroed. Anything written into either is overwritten a moment later. A value
+    /// that has to survive into `main` belongs in a section the startup code does not touch;
+    /// `cortex-m-rt` calls that one `.uninit`.
+    ///
+    /// The caller resumes with [`Bench::resume`].
+    pub fn reset_and_halt(&mut self, timeout: Duration) -> Result<(), Error> {
+        let mut core = self.session.core(0)?;
+        core.reset_and_halt(timeout)?;
         Ok(())
     }
 
