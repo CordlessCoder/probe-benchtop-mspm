@@ -910,6 +910,21 @@ impl Bench {
         Ok(core.read_word_32(address)?)
     }
 
+    /// Read a run of bytes at a raw address.
+    ///
+    /// **One core acquisition and one block transfer**, where a loop of [`Bench::read_u32`] pays
+    /// both per word. That is not a small difference: fetching a few kilobytes a word at a time
+    /// measured **8.2 s**, and the same bytes this way are a handful of transfers. Reach for this
+    /// whenever the range is more than a few words.
+    ///
+    /// Byte-addressed and byte-length, because the callers are memory images rather than register
+    /// files; alignment is probe-rs's to handle.
+    pub fn read_bytes(&mut self, address: u64, out: &mut [u8]) -> Result<(), Error> {
+        let mut core = self.session.core(0)?;
+        core.read(address, out)?;
+        Ok(())
+    }
+
     /// Write a word at a raw address.
     ///
     /// **No read-back here, unlike [`Bench::poke`].** A peripheral register is not memory: many are
