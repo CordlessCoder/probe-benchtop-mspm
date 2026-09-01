@@ -20,6 +20,12 @@
 //! unconditionally safe rather than a thing to ask about. The bank's reset is *not* asserted: that
 //! would clear the pin state of an application that is using it, and `PWREN` alone is enough.
 //!
+//! With that, driving a pin on an **erased** part works — confirmed on hardware. The core has to
+//! stay halted for it: a blank part faults as soon as it is released and takes the access port with
+//! it, so `reset_and_halt` and no resume is the sequence. The GPIO peripheral is a bus slave the
+//! debugger reaches without the CPU's help, which is why the CPU having nowhere to go does not
+//! matter.
+//!
 //! # And the firmware does not know it happened
 //!
 //! **This is the hazard, and it cannot be designed away.** A pin the firmware also uses has two

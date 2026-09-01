@@ -5,6 +5,8 @@
 //! bank was powered — which an application's `init` does and a blank part has never done. Every
 //! write went to an isolated peripheral, was dropped, and returned `Ok`.
 //!
+//! Confirmed on hardware against an erased part.
+//!
 //! # Why this works at all on a blank part
 //!
 //! A blank MSPM0 faults its core as soon as it is released, and the access port goes down with it.
