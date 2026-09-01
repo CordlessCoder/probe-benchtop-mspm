@@ -1,8 +1,24 @@
 //! Replicate probe-rs's DSSM mass erase on a healthy part, and report what the ROM actually says.
 //!
-//! Throwaway. The sequence is probe-rs's `dssm_mass_erase`, register for register, driven from
-//! outside so it can be run on a part whose AHB-AP answers — that function is only reached when the
-//! AHB-AP is dead, so nothing on a working board ever executes it.
+//! The sequence is probe-rs's `dssm_mass_erase`, register for register, driven from outside so it
+//! can be run on a part whose AHB-AP answers. That function is only reached when the AHB-AP is
+//! dead, so nothing on a working board ever executes it.
+//!
+//! # What this is for, which is not validating the response constants
+//!
+//! Those are already load-bearing where the sequence runs for real: a mismatch on either returns
+//! "mass erase rejected" with both values, so a recovery that succeeded is one where they matched.
+//! What was missing was having the values in hand, and two things nobody had checked at all.
+//!
+//! **That NONMAIN survives.** The claim that mass erase clears MAIN and leaves the boot
+//! configuration is what makes it safe to run silently inside an attach, and it was read from a
+//! datasheet rather than observed. Run [`nonmain_dump`](nonmain_dump) either side of this and it is
+//! a measurement: on an MSPM0L1306 the region came back byte-identical, `userCfgCRC` included.
+//!
+//! **That the probe honours `swj_pins`.** The mailbox is serviced only out of a `BOOTRST`, so the
+//! whole sequence rests on the reset pin actually moving. The call returns the read-back pin state,
+//! and bit 7 following the request is the confirmation — measured as `0x03` asserted and `0x83`
+//! released on a CMSIS-DAP probe.
 //!
 //! **This erases MAIN flash.** NONMAIN is untouched, which is the whole point of mass erase.
 use std::time::{Duration, Instant};
