@@ -29,6 +29,14 @@ use probe_bench::{Attach, Verify, mspm0_gpio};
 const DOE: u64 = 0x400A_12C0;
 
 fn main() -> anyhow::Result<()> {
+    // **Without this the interesting part is silent.** probe-rs is instrumented with `tracing` and
+    // says nothing without a subscriber, so an attach that recovers a device through the boot ROM
+    // looks identical to one that simply worked. `RUST_LOG=probe_rs=debug` is what shows which.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let erase = args.iter().any(|a| a == "--erase");
     let mut plain = args.iter().filter(|a| !a.starts_with("--"));

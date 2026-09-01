@@ -36,3 +36,10 @@ defmt-decoder = "1.0"
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
+
+[dev-dependencies]
+# **For the examples only, and they need it.** probe-rs is instrumented with `tracing` and says
+# nothing without a subscriber, so an example that drives a board can watch its own attach fail and
+# report no reason at all. A library must not install one — that is the binary's choice — which is
+# why this is a dev-dependency rather than a feature.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
