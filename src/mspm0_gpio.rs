@@ -138,6 +138,29 @@ pub struct State {
 }
 
 impl State {
+    /// Which internal pull the pad has.
+    ///
+    /// **Both bits set is not a state the hardware offers**, and reading it as `Up` rather than
+    /// refusing is deliberate: this reports what a register holds, and a pad configured by something
+    /// else is exactly what it is for.
+    #[must_use]
+    pub const fn pull(&self) -> Pull {
+        if self.pincm & PIPU != 0 {
+            Pull::Up
+        } else if self.pincm & PIPD != 0 {
+            Pull::Down
+        } else {
+            Pull::None
+        }
+    }
+
+    /// Whether the input buffer is on, which is what makes [`State::input`] a reading rather than
+    /// `None`.
+    #[must_use]
+    pub const fn readable(&self) -> bool {
+        self.pincm & INENA != 0
+    }
+
     /// Whether a peripheral other than GPIO is muxed onto it.
     #[must_use]
     pub const fn peripheral_owns_it(&self) -> bool {
@@ -241,6 +264,107 @@ pub fn drive(bench: &mut Bench, pin: Pin, level: bool) -> Result<State, Error> {
     Ok(was)
 }
 
+/// Which internal pull a pad has, or should have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Pull {
+    /// Neither. What a driven net wants, and what a pad with something external on it wants.
+    #[default]
+    None,
+    Up,
+    Down,
+}
+
+impl Pull {
+    pub const ALL: [Self; 3] = [Self::None, Self::Up, Self::Down];
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+
+    /// Parse a name, for a command line.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|pull| pull.name() == text)
+    }
+
+    /// The `PINCM` bits this sets.
+    const fn bits(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Up => PIPU,
+            Self::Down => PIPD,
+        }
+    }
+}
+
+/// What `PINCM` becomes when a pad is made readable without being taken.
+///
+/// **A function rather than a line inside [`observe`]**, so a test can exercise the arithmetic
+/// itself. Written inline, the only available test restates the same expression and passes for a
+/// mask that is wrong in both places.
+const fn pincm_observing(was: u32) -> u32 {
+    was | PC | INENA
+}
+
+/// What `PINCM` becomes when a pad is taken as a GPIO input with `pull`.
+const fn pincm_as_input(was: u32, pull: Pull) -> u32 {
+    (was & !(PF_MASK | PIPU | PIPD | HIZ1)) | GPIO_PF | PC | INENA | pull.bits()
+}
+
+/// Make a pin readable **without taking it from whatever owns it**.
+///
+/// # The least invasive thing that answers "what is this pad at"
+///
+/// `INENA` is independent of the pin function, so the input buffer can be turned on for a pad a
+/// peripheral is driving or capturing on, and [`read`] then reports the level while that peripheral
+/// keeps working. That is the difference between this and [`input`]: this observes, and that takes.
+///
+/// **It is not free of side effects, and one of them matters.** A pad rests *disconnected* — `PC`
+/// clear — and a disconnected pad reads nothing, so this sets `PC` as well. On a digital net that
+/// costs nothing. On an analog one it puts the digital input buffer across the node, which is a
+/// perturbation of the thing being measured: [`State::connected`] on the returned prior state is
+/// what says whether that happened, and [`restore`] is what undoes it.
+///
+/// Pulls, the output driver and the mux are all left exactly as found.
+pub fn observe(bench: &mut Bench, pin: Pin) -> Result<State, Error> {
+    if pin.is_debug() {
+        return Err(Error::DebugPin { pin: pin.0 });
+    }
+    power_on(bench)?;
+    let was = read(bench, pin)?;
+    bench.write_u32(pin.pincm(), pincm_observing(was.pincm))?;
+    Ok(was)
+}
+
+/// Take a pin as a plain GPIO input, with `pull`.
+///
+/// **This takes the pin**, where [`observe`] borrows it: the mux goes to GPIO and the output driver
+/// goes off, so whatever peripheral had it loses it until [`restore`]. Use it to read a net nothing
+/// on the part owns, or to see what an external driver is doing to one it does.
+///
+/// **Safe against contention in the one direction that matters.** The output driver is cleared
+/// before the mux moves, so there is no instant at which this pad drives a level chosen by whatever
+/// was in `DOUT`. [`drive`] has to do it the other way round and says so.
+pub fn input(bench: &mut Bench, pin: Pin, pull: Pull) -> Result<State, Error> {
+    if pin.is_debug() {
+        return Err(Error::DebugPin { pin: pin.0 });
+    }
+    power_on(bench)?;
+    let was = read(bench, pin)?;
+
+    // Off first: a pad that stops driving before it changes function never drives an unintended
+    // level, where the other order would put `DOUT` on the pin for the width of one bus write.
+    bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
+
+    bench.write_u32(pin.pincm(), pincm_as_input(was.pincm, pull))?;
+    Ok(was)
+}
+
 /// Put a pin back exactly as `was` found it.
 ///
 /// The output driver goes off before the mux is restored, for the same reason it went on last.
@@ -273,6 +397,52 @@ pub fn release(bench: &mut Bench, pin: Pin) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    /// **The distinction the two operations exist for.** `observe` leaves the mux and the driver
+    /// alone; `input` takes both. A test on the register arithmetic rather than on a part, because
+    /// the failure is a bit written into the wrong field and that is visible here.
+    #[test]
+    fn observing_keeps_the_function_and_taking_the_pin_does_not() {
+        // A pad a peripheral owns, driving, with a pull up.
+        let owned = (7 << 0) | PC | PIPU;
+
+        let observed = pincm_observing(owned);
+        assert_eq!(observed & PF_MASK, 7, "observe must not move the mux");
+        assert!(observed & INENA != 0);
+        assert!(observed & PIPU != 0, "observe must not change the pull");
+
+        let taken = pincm_as_input(owned, Pull::Down);
+        assert_eq!(taken & PF_MASK, GPIO_PF, "input takes the pin");
+        assert!(taken & PIPD != 0 && taken & PIPU == 0, "the old pull must not survive");
+        assert!(taken & INENA != 0);
+    }
+
+    /// A pull is one bit or neither, never both — a mask that failed to clear the other one would
+    /// leave a pad pulled two ways.
+    #[test]
+    fn a_pull_sets_one_bit_and_reads_back_as_itself() {
+        for pull in Pull::ALL {
+            let state = State {
+                pincm: pull.bits(),
+                driving: false,
+                output: false,
+                input: None,
+                function: 1,
+                connected: false,
+            };
+            assert_eq!(state.pull(), pull, "{}", pull.name());
+        }
+        assert_eq!(Pull::None.bits(), 0);
+        assert_ne!(Pull::Up.bits(), Pull::Down.bits());
+    }
+
+    #[test]
+    fn a_pull_survives_its_own_name() {
+        for pull in Pull::ALL {
+            assert_eq!(Pull::parse(pull.name()), Some(pull));
+        }
+        assert_eq!(Pull::parse("floating"), None);
+    }
+
     use super::*;
 
     /// **The index is the pin number**, against every document that says `n + 1`.
