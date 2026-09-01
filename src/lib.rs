@@ -792,6 +792,8 @@ impl Bench {
         self.write_flash_watching(address, bytes, |_| {})
     }
 
+    // **This resets the part when it is done**, and the reason is in `write_flash_watching`.
+
     /// [`Bench::write_flash`], reporting how far through it is.
     pub fn write_flash_watching(
         &mut self,
@@ -822,7 +824,18 @@ impl Bench {
 
         loader
             .commit(&mut self.session, options)
-            .map_err(|source| Error::Erase { source: Box::new(source) })
+            .map_err(|source| Error::Erase { source: Box::new(source) })?;
+
+        // **The reset is part of the write, not a courtesy.** Placing bytes runs a flash algorithm
+        // on the core: it is loaded into RAM and executed, and neither the application's RAM nor its
+        // execution context is put back afterwards. On a part with a few kilobytes of SRAM the
+        // algorithm lands on top of whatever the application had there.
+        //
+        // Measured on an MSPM0L1306: a counter the firmware advances every few seconds stops
+        // advancing and reads zero, and a command channel that answered before the write never
+        // answers again — until a reset, after which both work. So a caller that wrote a word and
+        // then asked the firmware about it would be asking a firmware that is no longer running.
+        self.reset()
     }
 
     /// Read one value by symbol name, while the core runs.
