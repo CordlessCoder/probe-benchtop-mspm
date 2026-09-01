@@ -177,6 +177,18 @@ pub enum Error {
         source: Box<probe_rs::flashing::FileDownloadError>,
     },
 
+    /// The chip's flash could not be erased.
+    ///
+    /// **Names no path, because no file was involved.** An erase is the target's own algorithm run
+    /// over the regions its description declares, and a failure here leaves the part somewhere
+    /// between untouched and partly blank — the same "do not carry on reading symbols" hazard as
+    /// [`Error::Flash`], from an operation that has no ELF to blame.
+    #[error("cannot erase the target's flash")]
+    Erase {
+        #[source]
+        source: Box<probe_rs::flashing::FlashError>,
+    },
+
     #[error(transparent)]
     Arm(#[from] probe_rs::architecture::arm::ArmError),
 
@@ -382,6 +394,55 @@ pub fn probes() -> Vec<ProbeChoice> {
             serial: info.serial_number.clone(),
         })
         .collect()
+}
+
+/// Turn one `probe_rs` progress event into a [`Progress`], accumulating as it goes.
+///
+/// **Shared because there are two callers**, programming and erasing, and the accumulation is the
+/// same arithmetic — the totals arrive up front in `AddProgressBar` and the sizes add up after.
+/// Written twice it is written differently eventually, and the difference shows as a bar that fills
+/// at a different rate depending on which operation is running.
+fn report(
+    event: probe_rs::flashing::ProgressEvent,
+    totals: &mut [Option<u64>; Phase::COUNT],
+    done: &mut u64,
+    watch: &mut impl FnMut(Progress),
+) {
+    use probe_rs::flashing::ProgressEvent as E;
+    match event {
+        E::AddProgressBar { operation, total } => totals[Phase::from(operation).index()] = total,
+        E::Started(operation) => {
+            *done = 0;
+            let phase = Phase::from(operation);
+            watch(Progress {
+                phase,
+                done: *done,
+                total: totals[phase.index()],
+            });
+        }
+        E::Progress { operation, size, .. } => {
+            *done = done.saturating_add(size);
+            let phase = Phase::from(operation);
+            watch(Progress {
+                phase,
+                done: *done,
+                total: totals[phase.index()],
+            });
+        }
+        // **A phase that ends is reported at its total rather than at what was counted.** The
+        // algorithm rounds a page to its own granularity, so the sum of the reports can fall short
+        // of the total it published and leave a bar that never fills.
+        E::Finished(operation) => {
+            let phase = Phase::from(operation);
+            let total = totals[phase.index()];
+            watch(Progress {
+                phase,
+                done: total.unwrap_or(*done),
+                total,
+            });
+        }
+        E::FlashLayoutReady { .. } | E::Failed(_) | E::DiagnosticMessage { .. } => {}
+    }
 }
 
 /// An attached board, with its ELF.
@@ -628,29 +689,7 @@ impl Bench {
         let mut options = probe_rs::flashing::DownloadOptions::default();
         options.verify = true;
         options.progress = probe_rs::flashing::FlashProgress::new(move |event| {
-            use probe_rs::flashing::ProgressEvent as E;
-            match event {
-                E::AddProgressBar { operation, total } => totals[Phase::from(operation).index()] = total,
-                E::Started(operation) => {
-                    done = 0;
-                    let phase = Phase::from(operation);
-                    watch(Progress { phase, done, total: totals[phase.index()] });
-                }
-                E::Progress { operation, size, .. } => {
-                    done = done.saturating_add(size);
-                    let phase = Phase::from(operation);
-                    watch(Progress { phase, done, total: totals[phase.index()] });
-                }
-                // **A phase that ends is reported at its total rather than at what was counted.**
-                // The algorithm rounds a page to its own granularity, so the sum of the reports can
-                // fall short of the total it published and leave a bar that never fills.
-                E::Finished(operation) => {
-                    let phase = Phase::from(operation);
-                    let total = totals[phase.index()];
-                    watch(Progress { phase, done: total.unwrap_or(done), total });
-                }
-                E::FlashLayoutReady { .. } | E::Failed(_) | E::DiagnosticMessage { .. } => {}
-            }
+            report(event, &mut totals, &mut done, &mut watch);
         });
         let format = probe_rs::flashing::ElfLoader(probe_rs::flashing::ElfOptions::default());
 
@@ -666,6 +705,44 @@ impl Bench {
         self.elf = elf.to_owned();
 
         self.reset()
+    }
+
+    /// Erase the chip's flash, and leave the core halted at a reset vector that holds nothing.
+    ///
+    /// # Which erase this is, because they are not interchangeable
+    ///
+    /// This drives the **flash algorithm** over the regions the target description declares, which
+    /// on an MSPM0 is MAIN. It is not the vendor debug-erase sequence — that one is a boot-ROM
+    /// command reached through `Session::sequence_erase_all`, it is what recovers a part whose
+    /// debug port has stopped answering, and on some families it can be made to erase boot
+    /// configuration as well.
+    ///
+    /// **The distinction is the difference between an erased application and an unreachable part.**
+    /// A caller that wants the first should not be able to get the second by accident, which is why
+    /// this names the narrower operation rather than taking a flag.
+    ///
+    /// # After this the ELF describes nothing
+    ///
+    /// Every symbol still resolves, because the symbol table came from the file rather than the
+    /// part, and every read returns whatever erased flash reads as. That is the same hazard
+    /// [`Verify`] guards at attach, arriving from the other direction — so tell somebody.
+    pub fn erase(&mut self) -> Result<(), Error> {
+        self.erase_watching(|_| {})
+    }
+
+    /// [`Bench::erase`], reporting how far through it is.
+    ///
+    /// See [`Bench::program_watching`] for why the phases are not one bar.
+    pub fn erase_watching(&mut self, mut watch: impl FnMut(Progress)) -> Result<(), Error> {
+        let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
+        let mut done = 0u64;
+        let mut progress = probe_rs::flashing::FlashProgress::new(move |event| {
+            report(event, &mut totals, &mut done, &mut watch);
+        });
+
+        probe_rs::flashing::erase_all(&mut self.session, &mut progress, false).map_err(|source| Error::Erase {
+            source: Box::new(source),
+        })
     }
 
     /// Read one value by symbol name, while the core runs.
