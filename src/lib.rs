@@ -339,6 +339,51 @@ impl Progress {
     }
 }
 
+/// One debug probe on the bus, as something a person can choose between.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProbeChoice {
+    /// What to put in [`Attach::probe`], in the form probe-rs parses.
+    pub selector: String,
+    /// What the probe calls itself.
+    pub name: String,
+    /// Its serial, where it has one.
+    ///
+    /// **This is what distinguishes two probes of the same model**, and it is the field a selector
+    /// needs to be unambiguous. A probe without one cannot be told apart from its twin.
+    pub serial: Option<String>,
+}
+
+impl std::fmt::Display for ProbeChoice {
+    /// Name, then serial, then the selector — most recognisable first.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)?;
+        if let Some(serial) = &self.serial {
+            write!(f, " ({serial})")?;
+        }
+        write!(f, " — {}", self.selector)
+    }
+}
+
+/// Every debug probe currently on the bus.
+///
+/// **Needs no session and cannot fail**, so a caller with no working attach can still offer a
+/// choice — which is the case that matters, since the usual reason to want this list is that the
+/// probe named at startup was the wrong one or was not plugged in.
+///
+/// The order is the lister's, which is the order an unnamed attach would pick from.
+#[must_use]
+pub fn probes() -> Vec<ProbeChoice> {
+    Lister::new()
+        .list_all()
+        .into_iter()
+        .map(|info| ProbeChoice {
+            selector: probe_rs::probe::DebugProbeSelector::from(&info).to_string(),
+            name: info.identifier.clone(),
+            serial: info.serial_number.clone(),
+        })
+        .collect()
+}
+
 /// An attached board, with its ELF.
 pub struct Bench {
     session: Session,
