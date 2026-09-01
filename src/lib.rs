@@ -950,16 +950,20 @@ impl Bench {
 /// Attaching leaves the core halted, so a session that never resumes and then exits leaves it
 /// halted too. This covers that.
 ///
-/// It does not cover everything. Measured on an L1306: a counter the firmware bumps every few
-/// seconds reads zero immediately after a tool that resumed the core exits, and zero again twelve
-/// seconds later — so the part is not running between sessions even with this in place. It runs
-/// perfectly *during* one, which is what a sweep needs, so the effect is on walking away rather
-/// than on measuring.
+/// **This used to carry a claim that the part does not run between sessions, and it was wrong.**
+/// The evidence was a counter reading zero after a tool exited and zero again twelve seconds later.
+/// The counter was in `.bss`, which the startup code re-zeroes on every start — so it reads zero
+/// after *any* reset, whether or not the part had been running. It had been.
 ///
-/// The cause is not established. probe-rs's own teardown is not an obvious candidate: `Session`'s
-/// drop clears breakpoints and calls `debug_core_stop`, and that sequence tears debug down and
-/// hands low-power control back without resetting. **Do not attach a story to it.** The workaround
-/// is one command — `probe-rs reset` — and the question is written down rather than guessed at.
+/// The cause was in `debug_port_start`. `DPREC0` bits 23:21 are set on a device that has been in a
+/// low-power state, and the MSPM0 sequence treated any of them as a fault and ran a recovery that
+/// begins with a system reset. So attaching to a sleeping part reset it, once per attach, and the
+/// reading was of the reset rather than of the detach. Measured with counters in `.uninit`, which
+/// startup does not touch: four attaches gave four boots before the fix and none after.
+///
+/// **The instruction that used to be here — do not attach a story to it — is the reason this was
+/// findable.** The question stayed open for weeks rather than being closed by a plausible account,
+/// and what settled it was a witness the reset could not clear.
 ///
 /// Best-effort, because a destructor has nowhere to return an error to. A failure here means the
 /// session was already broken, which the caller has heard about by another route.
