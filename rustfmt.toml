@@ -1,0 +1,13 @@
+# The same settings the projects that consume this crate use, so a file does not reformat when it
+# moves between them.
+#
+# `group_imports` and `imports_granularity` are unstable, so formatting needs a nightly rustfmt:
+#
+#     cargo +nightly fmt -- --unstable-features
+#
+# A plain `cargo fmt` on stable silently ignores both, and reformats the whole crate to the default
+# hundred-column width rather than refusing. This file exists because that happened.
+group_imports = "StdExternalCrate"
+imports_granularity = "Module"
+edition = "2024"
+max_width = 120

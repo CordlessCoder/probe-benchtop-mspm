@@ -15,8 +15,8 @@
 
 use std::path::Path;
 
-use object::read::elf::{ElfFile32, ProgramHeader};
 use object::Endianness;
+use object::read::elf::{ElfFile32, ProgramHeader};
 use probe_rs::{Core, MemoryInterface};
 
 use crate::Error;
@@ -117,22 +117,12 @@ fn windows(len: usize) -> Vec<(usize, usize)> {
     if len <= WINDOW * 3 {
         return vec![(0, len)];
     }
-    let mut spans = vec![
-        (0, WINDOW),
-        (len / 2 - WINDOW / 2, WINDOW),
-        (len - WINDOW, WINDOW),
-    ];
+    let mut spans = vec![(0, WINDOW), (len / 2 - WINDOW / 2, WINDOW), (len - WINDOW, WINDOW)];
     spans.dedup();
     spans
 }
 
-fn compare(
-    core: &mut Core<'_>,
-    address: u64,
-    expected: &[u8],
-    offset: usize,
-    elf: &Path,
-) -> Result<(), Error> {
+fn compare(core: &mut Core<'_>, address: u64, expected: &[u8], offset: usize, elf: &Path) -> Result<(), Error> {
     let mut actual = vec![0u8; expected.len()];
     core.read(address, &mut actual)?;
 

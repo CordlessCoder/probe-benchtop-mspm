@@ -65,13 +65,10 @@ impl Symbols {
 
     /// Look one up.
     pub fn get(&self, name: &str) -> Result<Symbol, Error> {
-        self.by_name
-            .get(name)
-            .copied()
-            .ok_or_else(|| Error::NoSuchSymbol {
-                name: name.to_owned(),
-                near: self.nearest(name),
-            })
+        self.by_name.get(name).copied().ok_or_else(|| Error::NoSuchSymbol {
+            name: name.to_owned(),
+            near: self.nearest(name),
+        })
     }
 
     /// Every symbol whose name contains `needle`, sorted. For a CLI that lists what is settable.
@@ -99,12 +96,7 @@ impl Symbols {
     /// A typo in a symbol name is the most likely way to reach `NoSuchSymbol`, and a bare "not
     /// found" against a table of several thousand is the least useful thing to say about one.
     fn nearest(&self, name: &str) -> Vec<String> {
-        let prefix_len = |candidate: &str| {
-            name.bytes()
-                .zip(candidate.bytes())
-                .take_while(|(a, b)| a == b)
-                .count()
-        };
+        let prefix_len = |candidate: &str| name.bytes().zip(candidate.bytes()).take_while(|(a, b)| a == b).count();
         let best = self.by_name.keys().map(|k| prefix_len(k)).max().unwrap_or(0);
         // Nothing in common is not a suggestion, it is noise.
         if best < 3 {
