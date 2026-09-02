@@ -30,7 +30,7 @@
 //! by `keep_unwritten_bytes`, but a run that dies in the middle leaves one word changed.
 use std::time::Duration;
 
-use probe_bench::{Attach, Bench, Verify};
+use probe_bench::{Attach, Bench, Target, Verify};
 
 /// Prefetch and cache control.
 const CPUSS_CTL: u64 = 0x4040_1300;
@@ -69,10 +69,17 @@ fn main() -> anyhow::Result<()> {
     // out of reach.
     let written = original ^ 0x0000_ff00;
     bench.write_flash(address, &written.to_le_bytes())?;
-    println!("after the write   flash {:#010x}  CPUSS.CTL {:#010x}", bench.read_u32(address)?, bench.read_u32(CPUSS_CTL)?);
+    println!(
+        "after the write   flash {:#010x}  CPUSS.CTL {:#010x}",
+        bench.read_u32(address)?,
+        bench.read_u32(CPUSS_CTL)?
+    );
 
     let after_reset = boot(&mut bench, &symbol)?;
-    println!("after a reset     {symbol} {after_reset:#010x}  CPUSS.CTL {:#010x}", bench.read_u32(CPUSS_CTL)?);
+    println!(
+        "after a reset     {symbol} {after_reset:#010x}  CPUSS.CTL {:#010x}",
+        bench.read_u32(CPUSS_CTL)?
+    );
     if after_reset == written {
         println!("\nthe CPU sees the write on the first reset. Nothing to explain.");
         return restore(&mut bench, address, original, &symbol);
@@ -110,6 +117,9 @@ fn boot(bench: &mut Bench, symbol: &str) -> Result<u32, probe_bench::Error> {
 fn restore(bench: &mut Bench, address: u64, original: u32, symbol: &str) -> anyhow::Result<()> {
     bench.write_flash(address, &original.to_le_bytes())?;
     let back = boot(bench, symbol)?;
-    println!("\nput back          flash {:#010x}  {symbol} {back:#010x}", bench.read_u32(address)?);
+    println!(
+        "\nput back          flash {:#010x}  {symbol} {back:#010x}",
+        bench.read_u32(address)?
+    );
     Ok(())
 }

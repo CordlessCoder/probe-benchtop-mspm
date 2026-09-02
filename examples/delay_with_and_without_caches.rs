@@ -20,7 +20,7 @@
 //! register, and both boots would then read the same.
 use std::time::Duration;
 
-use probe_bench::{Attach, Bench, Verify};
+use probe_bench::{Attach, Bench, Target, Verify};
 
 /// Long enough for the image to reach the loop and publish its count.
 const SETTLE: Duration = Duration::from_millis(300);

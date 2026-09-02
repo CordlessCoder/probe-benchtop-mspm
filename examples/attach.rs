@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use probe_bench::{Attach, Bench};
+use probe_bench::{Attach, Bench, Target};
 
 fn main() {
     // `Display`, not `Debug`. Every message in this crate is written to be read, and returning the

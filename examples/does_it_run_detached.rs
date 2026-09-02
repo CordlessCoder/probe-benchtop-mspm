@@ -34,7 +34,7 @@
 //! Measured 2026-09-01: phase 1 climbs at the rate the application advances it, phase 3 reads zero.
 use std::time::{Duration, Instant};
 
-use probe_bench::{Attach, Bench, Verify};
+use probe_bench::{Attach, Bench, Target, Verify};
 
 /// A counter the application advances on its own, at whatever rate it chooses.
 const COUNTER: &str = "a_counter";

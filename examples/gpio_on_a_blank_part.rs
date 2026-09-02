@@ -23,7 +23,7 @@
 //! access port is only reachable through the boot ROM's mass erase.
 use std::time::Duration;
 
-use probe_bench::{Attach, Verify, mspm0_gpio};
+use probe_bench::{Attach, Target, Verify, mspm0_gpio};
 
 /// `GPIOA.DOE31_0`, which says whether the drive took.
 const DOE: u64 = 0x400A_12C0;
@@ -70,7 +70,14 @@ fn main() -> anyhow::Result<()> {
     println!("halted at the reset vector");
 
     let powered = mspm0_gpio::power_on(&mut bench)?;
-    println!("GPIOA {}", if powered { "was not powered, and is now" } else { "was already powered" });
+    println!(
+        "GPIOA {}",
+        if powered {
+            "was not powered, and is now"
+        } else {
+            "was already powered"
+        }
+    );
 
     mspm0_gpio::drive(&mut bench, pin, true)?;
     let doe = bench.read_u32(DOE)?;

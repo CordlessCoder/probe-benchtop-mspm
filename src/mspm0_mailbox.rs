@@ -140,6 +140,7 @@ impl<'a> Mailbox<'a> {
     /// Fails rather than overwriting when one is already pending, because there is no queue and the
     /// alternative is losing a message the target has not read yet.
     pub fn send(&mut self, word: u32) -> Result<(), Error> {
+        let _span = tracing::trace_span!("mailbox_send").entered();
         if self.send_pending()? {
             return Err(Error::MailboxBusy);
         }
@@ -151,6 +152,7 @@ impl<'a> Mailbox<'a> {
     /// **Reading is what clears the flag**, so this consumes the word. There is no way to look
     /// without taking.
     pub fn try_receive(&mut self) -> Result<Option<u32>, Error> {
+        let _span = tracing::trace_span!("mailbox_receive").entered();
         if !self.receive_pending()? {
             return Ok(None);
         }

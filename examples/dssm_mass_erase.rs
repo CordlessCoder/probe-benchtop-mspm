@@ -83,7 +83,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Reading RXDATA clears RXVLD, so this order matters.
-    println!("RXDATA                 {:#010x}", arm.read_raw_ap_register(&ap, RXDATA)?);
+    println!(
+        "RXDATA                 {:#010x}",
+        arm.read_raw_ap_register(&ap, RXDATA)?
+    );
     println!("RXCTL                  {:#010x}", arm.read_raw_ap_register(&ap, RXCTL)?);
     Ok(())
 }

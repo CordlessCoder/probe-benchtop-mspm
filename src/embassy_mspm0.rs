@@ -14,7 +14,7 @@
 //! No halt and no volatile: the HAL keeps these as atomics, so the operations on them cannot be
 //! folded away, and a byte cannot tear — five of them read consistently from a running core.
 
-use crate::{Bench, Error};
+use crate::{Error, Target};
 
 /// One byte per level, in the HAL's own order.
 pub const SLEEP_BLOCKS: &str = "embassy_mspm0_sleep_blocks";
@@ -38,7 +38,7 @@ pub struct Sleep {
 
 impl Sleep {
     /// Read it from a running core.
-    pub fn read(bench: &mut Bench) -> Result<Self, Error> {
+    pub fn read(bench: &mut impl Target) -> Result<Self, Error> {
         let bytes = bench.peek_bytes(SLEEP_BLOCKS, LEVELS.len())?;
         let mut blocks = [0u8; LEVELS.len()];
         blocks.copy_from_slice(&bytes);
@@ -51,7 +51,10 @@ impl Sleep {
             None
         };
 
-        Ok(Self { blocks, min_sleep_ticks })
+        Ok(Self {
+            blocks,
+            min_sleep_ticks,
+        })
     }
 
     /// The deepest mode currently permitted, or `None` when all deep sleep is blocked.
@@ -85,7 +88,10 @@ mod tests {
     use super::*;
 
     fn sleep(blocks: [u8; 5]) -> Sleep {
-        Sleep { blocks, min_sleep_ticks: None }
+        Sleep {
+            blocks,
+            min_sleep_ticks: None,
+        }
     }
 
     /// Nothing held is the deepest mode the part has.

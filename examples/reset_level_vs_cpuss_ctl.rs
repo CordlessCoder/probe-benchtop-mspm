@@ -25,7 +25,7 @@
 //! **This writes flash and leaves an inert image on the part.** Reflash afterwards.
 use std::time::Duration;
 
-use probe_bench::{Attach, Bench, Verify};
+use probe_bench::{Attach, Bench, Target, Verify};
 
 /// Prefetch and cache control.
 const CPUSS_CTL: u64 = 0x4040_1300;
@@ -50,7 +50,10 @@ fn main() -> anyhow::Result<()> {
     };
     let mut bench = Bench::attach(&attach, &elf)?;
     bench.program(&elf)?;
-    println!("inert image on the part, CPUSS.CTL {:#010x}", bench.read_u32(CPUSS_CTL)?);
+    println!(
+        "inert image on the part, CPUSS.CTL {:#010x}",
+        bench.read_u32(CPUSS_CTL)?
+    );
 
     let algorithm_left = dirty(&mut bench, address)?;
     println!("after a flash write       {algorithm_left:#010x}");

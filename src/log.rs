@@ -105,12 +105,7 @@ impl Reader {
     /// **The version check is on the wire format, not the crate version.** `Table::parse` compares
     /// what the ELF declares against what this decoder speaks, and failing here with a clear
     /// message beats decoding garbage into plausible-looking lines.
-    pub fn attach(
-        session: &mut Session,
-        region: ScanRegion,
-        elf: &Path,
-        index: usize,
-    ) -> Result<Self, Error> {
+    pub fn attach(session: &mut Session, region: ScanRegion, elf: &Path, index: usize) -> Result<Self, Error> {
         let bytes = std::fs::read(elf).map_err(|source| Error::ElfRead {
             path: elf.to_path_buf(),
             source,
@@ -126,9 +121,11 @@ impl Reader {
             .filter(|l| !l.is_empty());
         let format = if table.is_some() { Format::Defmt } else { Format::Raw };
         let has_timestamp = table.as_ref().is_some_and(Table::has_timestamp);
-        let stream = table.map(|t| Box::leak(Box::new(t)) as &'static Table).map(Table::new_stream_decoder);
+        let stream = table
+            .map(|t| Box::leak(Box::new(t)) as &'static Table)
+            .map(Table::new_stream_decoder);
 
-        let mut core = session.core(0)?;
+        let mut core = crate::acquire(session)?;
         let rtt = Rtt::attach_region(&mut core, &region).map_err(|e| Error::NoRtt {
             detail: format!("at the address `{CONTROL_BLOCK}` names: {e}"),
         })?;
@@ -170,6 +167,7 @@ impl Reader {
     /// Returns an empty vector when there is nothing, which is the common case at a poll rate
     /// higher than the target logs at.
     pub fn poll(&mut self, core: &mut Core<'_>) -> Result<Vec<Line>, Error> {
+        let _span = tracing::debug_span!("log_poll").entered();
         let read = self.channel.read(core, &mut self.buffer)?;
 
         match self.format {
@@ -200,15 +198,13 @@ impl Reader {
         loop {
             match stream.decode() {
                 Ok(frame) => {
-                    let location = self
-                        .locations
-                        .as_ref()
-                        .and_then(|l| l.get(&frame.index()))
-                        .map(|Location { file, line, module, .. }| Where {
+                    let location = self.locations.as_ref().and_then(|l| l.get(&frame.index())).map(
+                        |Location { file, line, module, .. }| Where {
                             file: file.display().to_string(),
                             line: *line as u32,
                             module: module.clone(),
-                        });
+                        },
+                    );
                     out.push(Line {
                         level: frame.level().map(|l| format!("{l:?}").to_uppercase()),
                         timestamp: frame.display_timestamp().map(|t| t.to_string()),

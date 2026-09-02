@@ -11,7 +11,7 @@
 //! hide it**, which is the case the third and fourth readings separate.
 use std::time::Duration;
 
-use probe_bench::{Attach, Bench, Verify};
+use probe_bench::{Attach, Bench, Target, Verify};
 
 /// Prefetch and cache control.
 const CPUSS_CTL: u64 = 0x4040_1300;

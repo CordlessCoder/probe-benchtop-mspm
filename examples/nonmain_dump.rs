@@ -10,7 +10,7 @@
 //! MAIN's first words are printed alongside because the two regions are what a DSSM mass erase
 //! separates: it clears MAIN and leaves NONMAIN, and a dump either side of one shows that.
 
-use probe_bench::{Attach, Bench, Verify};
+use probe_bench::{Attach, Bench, Target, Verify};
 
 /// Where the boot configuration lives.
 const NONMAIN: u64 = 0x41C0_0000;

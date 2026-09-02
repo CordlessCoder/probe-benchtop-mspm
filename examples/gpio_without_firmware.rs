@@ -22,7 +22,7 @@
 //! Pass a pin that is safe to drive on whatever board this runs on.
 use std::time::Duration;
 
-use probe_bench::{Attach, Bench, Verify, mspm0_gpio};
+use probe_bench::{Attach, Bench, Target, Verify, mspm0_gpio};
 
 /// `GPIOA`'s GPRCM, from the metapac: the block is at `+0x800` and `PWREN` at `+0x00`.
 ///
@@ -56,7 +56,10 @@ fn main() -> anyhow::Result<()> {
     std::thread::sleep(Duration::from_millis(300));
     let status = bench.status()?;
     println!("with the image running ({status:?})");
-    anyhow::ensure!(!status.is_halted(), "the image is not running, so there is no control here");
+    anyhow::ensure!(
+        !status.is_halted(),
+        "the image is not running, so there is no control here"
+    );
     report(&mut bench, pin)?;
 
     bench.reset_and_halt(Duration::from_secs(1))?;
@@ -84,6 +87,9 @@ fn report(bench: &mut Bench, pin: mspm0_gpio::Pin) -> anyhow::Result<()> {
     let _ = mspm0_gpio::drive(bench, pin, true);
     let doe = bench.read_u32(DOE)?;
     let took = doe & (1 << pin.0) != 0;
-    println!("  DOE after drive  {doe:#010x}   the bit {}", if took { "took" } else { "was dropped" });
+    println!(
+        "  DOE after drive  {doe:#010x}   the bit {}",
+        if took { "took" } else { "was dropped" }
+    );
     Ok(())
 }

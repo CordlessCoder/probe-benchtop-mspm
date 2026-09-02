@@ -30,15 +30,147 @@ use probe_rs::{MemoryInterface, Permissions, Session};
 
 pub mod embassy_mspm0;
 mod image;
+pub mod log;
 pub mod mspm0_gpio;
 pub mod mspm0_mailbox;
-pub mod log;
 mod symbols;
 mod value;
 
 pub use image::Verify;
 pub use symbols::{Symbol, Symbols};
 pub use value::Value;
+
+/// Read and write a running target, however the core was come by.
+///
+/// Implemented twice. On [`Bench`] each call takes the core and gives it back, which is right for a
+/// one-shot. On [`Held`] the core is already taken and every call reuses it, which is right for a
+/// pass that reads several things at once.
+///
+/// **The difference is the whole point, and it is large.** Taking the core is a debug-port
+/// handshake, not a memory access: on one board and probe it measured six milliseconds against two
+/// for the word read that followed it. A reader that peeks twenty-five symbols pays that
+/// twenty-five times through [`Bench`] and once through [`Held`].
+///
+/// So write a reader against `&mut impl Target` rather than against either, and let the caller
+/// decide which it is worth.
+pub trait Target {
+    /// The ELF's symbol table, which is the schema.
+    fn symbols(&self) -> &Symbols;
+
+    /// Read one value by symbol name, while the core runs.
+    fn peek<T: Value>(&mut self, name: &str) -> Result<T, Error>;
+
+    /// Write without reading back, for a location the firmware also writes.
+    fn poke_unchecked<T: Value>(&mut self, name: &str, value: T) -> Result<(), Error>;
+
+    /// Read a symbol whose width is not one of the scalar types.
+    fn peek_bytes(&mut self, name: &str, len: usize) -> Result<Vec<u8>, Error>;
+
+    /// Read a word at a raw address, for a peripheral register rather than a symbol.
+    fn read_u32(&mut self, address: u64) -> Result<u32, Error>;
+
+    /// Read a run of bytes at a raw address, as one transfer.
+    fn read_bytes(&mut self, address: u64, out: &mut [u8]) -> Result<(), Error>;
+
+    /// Write a word at a raw address.
+    fn write_u32(&mut self, address: u64, value: u32) -> Result<(), Error>;
+
+    /// Whether a symbol is in this image at all.
+    fn has(&self, name: &str) -> bool {
+        self.symbols().get(name).is_ok()
+    }
+
+    /// Write one value by symbol name and read it back.
+    ///
+    /// **The read-back is not validating the value.** Nothing here has an opinion about whether a
+    /// poked number is sensible — a sweep exists to find where the logic stops holding, so an
+    /// out-of-range value is the experiment. What it catches is the write not landing at all: a
+    /// symbol in flash, or an address the core is holding. Without it a sweep silently repeats one
+    /// point and draws a flat curve, which is a working-looking result and the hardest kind of
+    /// wrong.
+    ///
+    /// Only for locations the firmware does not itself write. For those, see
+    /// [`Target::poke_unchecked`] — a read-back there is a race rather than a check, and it would
+    /// report a failure whenever the firmware happened to win it.
+    fn poke<T: Value>(&mut self, name: &str, value: T) -> Result<(), Error> {
+        self.poke_unchecked(name, value)?;
+        let read: T = self.peek(name)?;
+        if read.as_u64() != value.as_u64() {
+            return Err(Error::PokeDidNotStick {
+                name: name.to_owned(),
+                wrote: value.as_u64(),
+                read: read.as_u64(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The core, taken once and kept for several operations.
+///
+/// Built by [`Bench::hold`] and given back when it drops. Every [`Target`] call on it reuses the
+/// one acquisition, which is what makes a multi-symbol pass cheap — see the trait's own docs for
+/// the measurement.
+///
+/// **Hold it for a pass, not for the program.** While one exists the session's core is checked out,
+/// so nothing else can take it, and a [`Bench`] method that acquires cannot run.
+pub struct Held<'a> {
+    core: probe_rs::Core<'a>,
+    symbols: &'a Symbols,
+}
+
+impl<'a> Held<'a> {
+    /// The core itself, for an operation this trait does not cover.
+    ///
+    /// Reach for it where a probe-rs API is needed directly — following RTT is the case here.
+    pub fn core(&mut self) -> &mut probe_rs::Core<'a> {
+        &mut self.core
+    }
+}
+
+impl Target for Held<'_> {
+    fn symbols(&self) -> &Symbols {
+        self.symbols
+    }
+
+    fn peek<T: Value>(&mut self, name: &str) -> Result<T, Error> {
+        let _span = tracing::trace_span!("peek", symbol = name).entered();
+        let symbol = self.symbols.get(name)?;
+        check(name, symbol, T::WIDTH, T::NAME)?;
+        T::read(&mut self.core, symbol.address)
+    }
+
+    fn poke_unchecked<T: Value>(&mut self, name: &str, value: T) -> Result<(), Error> {
+        let _span = tracing::trace_span!("poke", symbol = name).entered();
+        let symbol = self.symbols.get(name)?;
+        check(name, symbol, T::WIDTH, T::NAME)?;
+        value.write(&mut self.core, symbol.address)
+    }
+
+    fn peek_bytes(&mut self, name: &str, len: usize) -> Result<Vec<u8>, Error> {
+        let _span = tracing::trace_span!("peek_bytes", symbol = name, len).entered();
+        let symbol = self.symbols.get(name)?;
+        let mut out = vec![0u8; len];
+        self.core.read(symbol.address, &mut out)?;
+        Ok(out)
+    }
+
+    fn read_u32(&mut self, address: u64) -> Result<u32, Error> {
+        let _span = tracing::trace_span!("read_u32").entered();
+        Ok(self.core.read_word_32(address)?)
+    }
+
+    fn read_bytes(&mut self, address: u64, out: &mut [u8]) -> Result<(), Error> {
+        let _span = tracing::trace_span!("read_bytes", len = out.len()).entered();
+        self.core.read(address, out)?;
+        Ok(())
+    }
+
+    fn write_u32(&mut self, address: u64, value: u32) -> Result<(), Error> {
+        let _span = tracing::trace_span!("write_u32").entered();
+        Ok(self.core.write_word_32(address, value)?)
+    }
+}
 
 /// Everything that can go wrong, named by what a user did rather than by what a layer returned.
 #[derive(Debug, thiserror::Error)]
@@ -74,11 +206,7 @@ pub enum Error {
     },
 
     #[error("`{name}` is at {address:#010x}, which is not {alignment}-byte aligned")]
-    Misaligned {
-        name: String,
-        address: u64,
-        alignment: u64,
-    },
+    Misaligned { name: String, address: u64, alignment: u64 },
 
     /// A write that did not stick.
     ///
@@ -230,6 +358,22 @@ fn maybe(chip: &Option<String>) -> String {
     chip.as_deref().map(|c| format!(" to {c}")).unwrap_or_default()
 }
 
+/// Take core 0, counting the acquisition.
+///
+/// **Every acquisition in this crate goes through here**, and it is a span rather than a plain call
+/// so that a profile counts them. On a wire-limited link the acquisition is the unit of cost, not
+/// the transfer: reading thirty-two registers one word at a time and reading them as one block move
+/// the same bytes, and differ by thirty-one acquisitions. So the count is the number worth watching
+/// while a caller is being made cheaper, and it is deterministic where a millisecond figure moves
+/// with the probe, the link speed and the host.
+///
+/// A free function on the session rather than a method on [`Bench`], so a caller may hold a
+/// borrow of the symbol table across it.
+pub(crate) fn acquire(session: &mut Session) -> Result<probe_rs::Core<'_>, Error> {
+    let _span = tracing::trace_span!("core_acquire").entered();
+    Ok(session.core(0)?)
+}
+
 /// How to reach a board.
 ///
 /// A struct rather than four arguments, because a bench acquires these one at a time and a caller
@@ -360,7 +504,10 @@ impl Progress {
         if total == 0 {
             return Some(1.0);
         }
-        #[expect(clippy::cast_precision_loss, reason = "a flash image is far short of a float's exact range")]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a flash image is far short of a float's exact range"
+        )]
         Some((self.done.min(total) as f32) / (total as f32))
     }
 }
@@ -477,16 +624,16 @@ impl Bench {
     /// Note that attaching itself can halt a running core, depending on the probe and the debug
     /// sequence — [`Bench::status`] says whether it did and [`Bench::resume`] is the way back.
     pub fn attach(attach: &Attach, elf: &Path) -> Result<Self, Error> {
+        let _span = tracing::debug_span!("attach", chip = %attach.chip).entered();
         let symbols = Symbols::load(elf)?;
 
         let lister = Lister::new();
         let probe = match &attach.probe {
             Some(selector) => {
-                let selector: DebugProbeSelector =
-                    selector.parse().map_err(|cause| Error::BadSelector {
-                        selector: selector.clone(),
-                        cause: format!("{cause}"),
-                    })?;
+                let selector: DebugProbeSelector = selector.parse().map_err(|cause| Error::BadSelector {
+                    selector: selector.clone(),
+                    cause: format!("{cause}"),
+                })?;
                 lister.open(selector).map_err(|source| Error::NoSuchProbe {
                     selector: attach.probe.clone().unwrap_or_default(),
                     source,
@@ -500,21 +647,15 @@ impl Bench {
                         probe_rs::probe::ProbeCreationError::NotFound,
                     ),
                 })?;
-                lister
-                    .open(first.clone())
-                    .map_err(|source| Error::NoSuchProbe {
-                        selector: "<any>".to_owned(),
-                        source,
-                    })?
+                lister.open(first.clone()).map_err(|source| Error::NoSuchProbe {
+                    selector: "<any>".to_owned(),
+                    source,
+                })?
             }
         };
 
         let mut probe = probe;
-        probe.select_protocol(
-            attach
-                .protocol
-                .unwrap_or(probe_rs::probe::WireProtocol::Swd),
-        )?;
+        probe.select_protocol(attach.protocol.unwrap_or(probe_rs::probe::WireProtocol::Swd))?;
         if let Some(khz) = attach.speed_khz {
             probe.set_speed(khz)?;
         }
@@ -541,7 +682,7 @@ impl Bench {
         };
 
         {
-            let mut core = bench.session.core(0)?;
+            let mut core = acquire(&mut bench.session)?;
             image::verify(&mut core, elf, attach.verify)?;
         }
 
@@ -564,7 +705,8 @@ impl Bench {
     /// timing budget that is not an observation, it is an intervention. Use [`Bench::prove_running`]
     /// only when this is not enough.
     pub fn status(&mut self) -> Result<CoreStatus, Error> {
-        let mut core = self.session.core(0)?;
+        let _span = tracing::debug_span!("status").entered();
+        let mut core = acquire(&mut self.session)?;
         Ok(core.status()?)
     }
 
@@ -573,10 +715,7 @@ impl Bench {
     /// `Sleeping` counts. A part that has entered a low-power mode between interrupts is working
     /// exactly as intended, and treating it as dead is the mistake this exists to prevent.
     pub fn is_live(&mut self) -> Result<bool, Error> {
-        Ok(matches!(
-            self.status()?,
-            CoreStatus::Running | CoreStatus::Sleeping
-        ))
+        Ok(matches!(self.status()?, CoreStatus::Running | CoreStatus::Sleeping))
     }
 
     /// Halt, read the program counter, resume, and do it again — proving it moved.
@@ -585,7 +724,8 @@ impl Bench {
     /// timing to keep will miss it. [`Bench::status`] first; this is for when a core reports
     /// `Running` and you suspect it is spinning in a fault handler.
     pub fn prove_running(&mut self) -> Result<bool, Error> {
-        let mut core = self.session.core(0)?;
+        let _span = tracing::debug_span!("prove_running").entered();
+        let mut core = acquire(&mut self.session)?;
 
         core.halt(std::time::Duration::from_millis(500))?;
         let first = core.read_core_reg::<u64>(core.program_counter())?;
@@ -606,7 +746,8 @@ impl Bench {
     /// a harness whose whole job is watching a running board should not silently be watching a
     /// stopped one. [`Bench::status`] says which happened; this is the way back.
     pub fn resume(&mut self) -> Result<(), Error> {
-        let mut core = self.session.core(0)?;
+        let _span = tracing::debug_span!("resume").entered();
+        let mut core = acquire(&mut self.session)?;
         if core.status()?.is_halted() {
             core.run()?;
         }
@@ -626,7 +767,8 @@ impl Bench {
     /// last values rather than an error, and a firmware that has stopped looks like one whose
     /// numbers happen not to be changing.
     pub fn reset(&mut self) -> Result<(), Error> {
-        let mut core = self.session.core(0)?;
+        let _span = tracing::debug_span!("reset").entered();
+        let mut core = acquire(&mut self.session)?;
         core.reset()?;
         if core.status()?.is_halted() {
             core.run()?;
@@ -644,7 +786,8 @@ impl Bench {
     ///
     /// The caller resumes with [`Bench::resume`].
     pub fn reset_and_halt(&mut self, timeout: Duration) -> Result<(), Error> {
-        let mut core = self.session.core(0)?;
+        let _span = tracing::debug_span!("reset_and_halt").entered();
+        let mut core = acquire(&mut self.session)?;
         core.reset_and_halt(timeout)?;
         Ok(())
     }
@@ -696,12 +839,9 @@ impl Bench {
     /// its own total. [`Progress::fraction`] is therefore the fraction of the *current* phase, and
     /// a caller that wants one number for the whole operation is choosing weights the algorithm
     /// did not supply.
-    pub fn program_watching(
-        &mut self,
-        elf: &Path,
-        mut watch: impl FnMut(Progress),
-    ) -> Result<(), Error> {
+    pub fn program_watching(&mut self, elf: &Path, mut watch: impl FnMut(Progress)) -> Result<(), Error> {
         let symbols = Symbols::load(elf)?;
+        let _span = tracing::debug_span!("program").entered();
 
         // Filled from the `AddProgressBar` events, which all arrive before any work starts.
         let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
@@ -714,11 +854,12 @@ impl Bench {
         });
         let format = probe_rs::flashing::ElfLoader(probe_rs::flashing::ElfOptions::default());
 
-        probe_rs::flashing::download_file_with_options(&mut self.session, elf, format, options)
-            .map_err(|source| Error::Flash {
+        probe_rs::flashing::download_file_with_options(&mut self.session, elf, format, options).map_err(|source| {
+            Error::Flash {
                 path: elf.to_owned(),
                 source: Box::new(source),
-            })?;
+            }
+        })?;
 
         // Adopted only once the write succeeded. On the error path the old ELF stays, which is
         // wrong about the part — but so is every other answer, and the error says so.
@@ -755,6 +896,8 @@ impl Bench {
     ///
     /// See [`Bench::program_watching`] for why the phases are not one bar.
     pub fn erase_watching(&mut self, mut watch: impl FnMut(Progress)) -> Result<(), Error> {
+        let _span = tracing::debug_span!("erase").entered();
+        let _span = tracing::debug_span!("erase").entered();
         let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
         let mut done = 0u64;
         let mut progress = probe_rs::flashing::FlashProgress::new(move |event| {
@@ -808,9 +951,9 @@ impl Bench {
             self.session.target().memory_map.clone(),
             probe_rs::config::TargetDescriptionSource::BuiltIn,
         );
-        loader
-            .add_data(address, bytes)
-            .map_err(|source| Error::Erase { source: Box::new(source) })?;
+        loader.add_data(address, bytes).map_err(|source| Error::Erase {
+            source: Box::new(source),
+        })?;
 
         let mut options = probe_rs::flashing::DownloadOptions::default();
         options.verify = true;
@@ -824,7 +967,9 @@ impl Bench {
 
         loader
             .commit(&mut self.session, options)
-            .map_err(|source| Error::Erase { source: Box::new(source) })?;
+            .map_err(|source| Error::Erase {
+                source: Box::new(source),
+            })?;
 
         // **The reset is part of the write, not a courtesy.** Placing bytes runs a flash algorithm
         // on the core: it is loaded into RAM and executed, and neither the application's RAM nor its
@@ -842,97 +987,26 @@ impl Bench {
     ///
     /// The ELF's recorded width is checked against `T` first, so asking for the wrong type is an
     /// error rather than three bytes of a neighbour.
-    pub fn peek<T: Value>(&mut self, name: &str) -> Result<T, Error> {
-        let symbol = self.symbols.get(name)?;
-        check(name, symbol, T::WIDTH, T::NAME)?;
-        let mut core = self.session.core(0)?;
-        T::read(&mut core, symbol.address)
+    /// Take the core once, for a run of operations that would otherwise take it each.
+    ///
+    /// **The one call that makes a multi-symbol read cheap.** See [`Target`] for the measurement;
+    /// the short version is that acquiring costs about three times what reading a word does, so a
+    /// pass reading twenty-five symbols spends most of itself acquiring unless it holds.
+    ///
+    /// The core is given back when the [`Held`] drops. Hold it for a pass, not for the program.
+    pub fn hold(&mut self) -> Result<Held<'_>, Error> {
+        // Disjoint fields, so the symbol table stays readable while the session is borrowed.
+        let symbols = &self.symbols;
+        let core = acquire(&mut self.session)?;
+        Ok(Held { core, symbols })
     }
 
-    /// Write one value by symbol name, while the core runs, and read it back.
+    /// Take core 0.
     ///
-    /// **The read-back is not optional here, and it is not validating the value.** Nothing in this
-    /// crate has an opinion about whether a poked number is sensible — a sweep exists to find where
-    /// the logic stops holding, so an out-of-range value is the experiment. What the read-back
-    /// catches is the write not landing at all: a symbol in flash, or an address the core is
-    /// holding. Without it a sweep silently repeats one point and draws a flat curve, which is a
-    /// working-looking result and the hardest kind of wrong.
-    ///
-    /// Only for locations the firmware does not itself write. For those, see
-    /// [`Bench::poke_unchecked`].
-    pub fn poke<T: Value>(&mut self, name: &str, value: T) -> Result<(), Error> {
-        self.poke_unchecked(name, value)?;
-        let read: T = self.peek(name)?;
-        if read.as_u64() != value.as_u64() {
-            return Err(Error::PokeDidNotStick {
-                name: name.to_owned(),
-                wrote: value.as_u64(),
-                read: read.as_u64(),
-            });
-        }
-        Ok(())
-    }
-
-    /// Write without reading back, for a location the firmware also writes.
-    ///
-    /// A read-back there is a race rather than a check, and it would report a failure whenever the
-    /// firmware happened to win it.
-    pub fn poke_unchecked<T: Value>(&mut self, name: &str, value: T) -> Result<(), Error> {
-        let symbol = self.symbols.get(name)?;
-        check(name, symbol, T::WIDTH, T::NAME)?;
-        let mut core = self.session.core(0)?;
-        value.write(&mut core, symbol.address)
-    }
-
-    /// Read a symbol whose width is not one of the scalar types — an array, or a struct.
-    ///
-    /// No width check, because there is no type to check against. The ELF's recorded size is what
-    /// a caller should ask for, and [`Symbols::get`] is how to find it.
-    pub fn peek_bytes(&mut self, name: &str, len: usize) -> Result<Vec<u8>, Error> {
-        let symbol = self.symbols.get(name)?;
-        let mut out = vec![0u8; len];
-        let mut core = self.session.core(0)?;
-        core.read(symbol.address, &mut out)?;
-        Ok(out)
-    }
-
-    /// Whether a symbol is in this image at all.
-    ///
-    /// For state a HAL exports only under some feature, where absent and zero mean different
-    /// things and reporting the second for the first is a wrong answer rather than a missing one.
-    pub fn has(&self, name: &str) -> bool {
-        self.symbols.get(name).is_ok()
-    }
-
-    /// Read a word at a raw address, for a peripheral register rather than a symbol.
-    pub fn read_u32(&mut self, address: u64) -> Result<u32, Error> {
-        let mut core = self.session.core(0)?;
-        Ok(core.read_word_32(address)?)
-    }
-
-    /// Read a run of bytes at a raw address.
-    ///
-    /// **One core acquisition and one block transfer**, where a loop of [`Bench::read_u32`] pays
-    /// both per word. That is not a small difference: fetching a few kilobytes a word at a time
-    /// measured **8.2 s**, and the same bytes this way are a handful of transfers. Reach for this
-    /// whenever the range is more than a few words.
-    ///
-    /// Byte-addressed and byte-length, because the callers are memory images rather than register
-    /// files; alignment is probe-rs's to handle.
-    pub fn read_bytes(&mut self, address: u64, out: &mut [u8]) -> Result<(), Error> {
-        let mut core = self.session.core(0)?;
-        core.read(address, out)?;
-        Ok(())
-    }
-
-    /// Write a word at a raw address.
-    ///
-    /// **No read-back here, unlike [`Bench::poke`].** A peripheral register is not memory: many are
-    /// write-one-to-set or write-one-to-clear, and reading one back after writing it compares two
-    /// different things and reports a failure that is not one.
-    pub fn write_u32(&mut self, address: u64, value: u32) -> Result<(), Error> {
-        let mut core = self.session.core(0)?;
-        Ok(core.write_word_32(address, value)?)
+    /// **Prefer this to [`Bench::session`] plus `core(0)`**, which reaches the same core without
+    /// being counted. See [`acquire`] for why the count is the number worth having.
+    pub fn core(&mut self) -> Result<probe_rs::Core<'_>, Error> {
+        acquire(&mut self.session)
     }
 
     /// Follow this target's log.
@@ -940,6 +1014,7 @@ impl Bench {
     /// Here rather than on the reader because the control block's address and the session both
     /// come out of this struct, and a caller cannot borrow one while passing the other.
     pub fn logs(&mut self, channel: usize) -> Result<log::Reader, Error> {
+        let _span = tracing::debug_span!("logs_attach").entered();
         let elf = self.elf.clone();
         let region = log::region(&self.symbols)?;
         log::Reader::attach(&mut self.session, region, &elf, channel)
@@ -980,6 +1055,37 @@ impl Bench {
 /// findable.** The question stayed open for weeks rather than being closed by a plausible account,
 /// and what settled it was a witness the reset could not clear.
 ///
+/// One acquisition per call. For a run of operations, [`Bench::hold`] pays it once.
+impl Target for Bench {
+    fn symbols(&self) -> &Symbols {
+        &self.symbols
+    }
+
+    fn peek<T: Value>(&mut self, name: &str) -> Result<T, Error> {
+        self.hold()?.peek(name)
+    }
+
+    fn poke_unchecked<T: Value>(&mut self, name: &str, value: T) -> Result<(), Error> {
+        self.hold()?.poke_unchecked(name, value)
+    }
+
+    fn peek_bytes(&mut self, name: &str, len: usize) -> Result<Vec<u8>, Error> {
+        self.hold()?.peek_bytes(name, len)
+    }
+
+    fn read_u32(&mut self, address: u64) -> Result<u32, Error> {
+        self.hold()?.read_u32(address)
+    }
+
+    fn read_bytes(&mut self, address: u64, out: &mut [u8]) -> Result<(), Error> {
+        self.hold()?.read_bytes(address, out)
+    }
+
+    fn write_u32(&mut self, address: u64, value: u32) -> Result<(), Error> {
+        self.hold()?.write_u32(address, value)
+    }
+}
+
 /// Best-effort, because a destructor has nowhere to return an error to. A failure here means the
 /// session was already broken, which the caller has heard about by another route.
 impl Drop for Bench {
@@ -987,15 +1093,12 @@ impl Drop for Bench {
         if !self.resume_on_drop {
             return;
         }
-        let resumed = self
-            .session
-            .core(0)
-            .and_then(|mut core| {
-                if core.status()?.is_halted() {
-                    core.run()?;
-                }
-                Ok(())
-            });
+        let resumed = acquire(&mut self.session).and_then(|mut core| {
+            if core.status()?.is_halted() {
+                core.run()?;
+            }
+            Ok(())
+        });
         if let Err(e) = resumed {
             tracing::warn!("could not resume the core on detach, so the board is stopped: {e}");
         }
@@ -1029,7 +1132,11 @@ mod tests {
     use super::{Phase, Progress};
 
     fn at(done: u64, total: Option<u64>) -> Progress {
-        Progress { phase: Phase::Program, done, total }
+        Progress {
+            phase: Phase::Program,
+            done,
+            total,
+        }
     }
 
     #[test]
@@ -1059,7 +1166,11 @@ mod tests {
         let mut seen: Vec<usize> = all.iter().map(|p| p.index()).collect();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), Phase::COUNT, "two phases share a slot, so one overwrites the other's total");
+        assert_eq!(
+            seen.len(),
+            Phase::COUNT,
+            "two phases share a slot, so one overwrites the other's total"
+        );
         assert!(seen.iter().all(|&i| i < Phase::COUNT), "a slot is outside the table");
     }
 }

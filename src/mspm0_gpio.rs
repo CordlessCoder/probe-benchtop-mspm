@@ -40,7 +40,7 @@
 //! because a bench exists to try things and the tool has no way to know what is wired to a board.
 //! The debug pins are different in kind: driving them removes the ability to undo it.
 
-use crate::{Bench, Error};
+use crate::{Error, Target};
 
 /// `GPIOA`, from the metapac.
 const GPIOA: u64 = 0x400A_0000;
@@ -169,7 +169,7 @@ impl State {
 }
 
 /// Read one pin without disturbing it.
-pub fn read(bench: &mut Bench, pin: Pin) -> Result<State, Error> {
+pub fn read(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
     power_on(bench)?;
     let pincm = bench.read_u32(pin.pincm())?;
     let doe = bench.read_u32(GPIOA + DOE31_0)?;
@@ -201,7 +201,7 @@ pub fn read(bench: &mut Bench, pin: Pin) -> Result<State, Error> {
 ///
 /// The bank's reset is deliberately not asserted. `PWREN` alone is enough, measured, and asserting
 /// reset would clear the pin state of a firmware that owns pins in this bank.
-pub fn power_on(bench: &mut Bench) -> Result<bool, Error> {
+pub fn power_on(bench: &mut impl Target) -> Result<bool, Error> {
     if bench.read_u32(GPIOA + PWREN)? & PWREN_ENABLE != 0 {
         return Ok(false);
     }
@@ -212,16 +212,25 @@ pub fn power_on(bench: &mut Bench) -> Result<bool, Error> {
     Ok(true)
 }
 
-pub fn read_all(bench: &mut Bench) -> Result<Vec<(Pin, State)>, Error> {
+pub fn read_all(bench: &mut impl Target) -> Result<Vec<(Pin, State)>, Error> {
+    let _span = tracing::debug_span!("gpio_read_all").entered();
     power_on(bench)?;
     let doe = bench.read_u32(GPIOA + DOE31_0)?;
     let dout = bench.read_u32(GPIOA + DOUT31_0)?;
     let din = bench.read_u32(GPIOA + DIN31_0)?;
 
+    // **One block transfer, not thirty-two word reads.** The `PINCM` array is contiguous, and on
+    // this link taking the core costs about three times what moving four bytes does — so a loop of
+    // `read_u32` here spent most of a pin sweep acquiring rather than reading. Measured on one
+    // board and probe: 288 ms as a loop against 46 ms this way, and 35 acquisitions against 4.
+    let mut raw = [0u8; 4 * 32];
+    bench.read_bytes(Pin(0).pincm(), &mut raw)?;
+
     let mut out = Vec::with_capacity(32);
     for n in 0..32u8 {
         let pin = Pin(n);
-        let pincm = bench.read_u32(pin.pincm())?;
+        let at = n as usize * 4;
+        let pincm = u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
         out.push((
             pin,
             State {
@@ -247,7 +256,7 @@ pub fn read_all(bench: &mut Bench) -> Result<Vec<(Pin, State)>, Error> {
 /// The input buffer is left on, so [`read`] keeps reporting what the pad is really at. That is
 /// worth the microamps here: a driven pin reading back the opposite level is how contention with
 /// something external announces itself, and with the buffer off there is nothing to see.
-pub fn drive(bench: &mut Bench, pin: Pin, level: bool) -> Result<State, Error> {
+pub fn drive(bench: &mut impl Target, pin: Pin, level: bool) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
@@ -331,7 +340,7 @@ const fn pincm_as_input(was: u32, pull: Pull) -> u32 {
 /// what says whether that happened, and [`restore`] is what undoes it.
 ///
 /// Pulls, the output driver and the mux are all left exactly as found.
-pub fn observe(bench: &mut Bench, pin: Pin) -> Result<State, Error> {
+pub fn observe(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
@@ -350,7 +359,7 @@ pub fn observe(bench: &mut Bench, pin: Pin) -> Result<State, Error> {
 /// **Safe against contention in the one direction that matters.** The output driver is cleared
 /// before the mux moves, so there is no instant at which this pad drives a level chosen by whatever
 /// was in `DOUT`. [`drive`] has to do it the other way round and says so.
-pub fn input(bench: &mut Bench, pin: Pin, pull: Pull) -> Result<State, Error> {
+pub fn input(bench: &mut impl Target, pin: Pin, pull: Pull) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
@@ -368,10 +377,10 @@ pub fn input(bench: &mut Bench, pin: Pin, pull: Pull) -> Result<State, Error> {
 /// Put a pin back exactly as `was` found it.
 ///
 /// The output driver goes off before the mux is restored, for the same reason it went on last.
-pub fn restore(bench: &mut Bench, pin: Pin, was: &State) -> Result<(), Error> {
+pub fn restore(bench: &mut impl Target, pin: Pin, was: &State) -> Result<(), Error> {
     if !was.driving {
         power_on(bench)?;
-    bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
+        bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
     }
     bench.write_u32(pin.pincm(), was.pincm)?;
     if was.driving {
@@ -383,7 +392,7 @@ pub fn restore(bench: &mut Bench, pin: Pin, was: &State) -> Result<(), Error> {
 }
 
 /// Stop driving a pin and leave it disconnected, which is where an unused net rests.
-pub fn release(bench: &mut Bench, pin: Pin) -> Result<(), Error> {
+pub fn release(bench: &mut impl Target, pin: Pin) -> Result<(), Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
@@ -470,13 +479,23 @@ mod tests {
     /// "no peripheral" — so an unconnected pin must not read as owned.
     #[test]
     fn peripheral_ownership_needs_both_connected_and_a_non_gpio_function() {
-        let owned = State { pincm: 0, driving: false, output: false, input: None, function: 5, connected: true };
+        let owned = State {
+            pincm: 0,
+            driving: false,
+            output: false,
+            input: None,
+            function: 5,
+            connected: true,
+        };
         assert!(owned.peripheral_owns_it());
 
         let gpio = State { function: 1, ..owned };
         assert!(!gpio.peripheral_owns_it());
 
-        let disconnected = State { connected: false, ..owned };
+        let disconnected = State {
+            connected: false,
+            ..owned
+        };
         assert!(!disconnected.peripheral_owns_it());
     }
 }
