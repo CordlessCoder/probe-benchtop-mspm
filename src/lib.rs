@@ -126,6 +126,32 @@ impl<'a> Held<'a> {
     pub fn core(&mut self) -> &mut probe_rs::Core<'a> {
         &mut self.core
     }
+
+    /// Let a halted core run. See [`Bench::resume`].
+    pub fn resume(&mut self) -> Result<(), Error> {
+        let _span = tracing::debug_span!("resume").entered();
+        if self.core.status()?.is_halted() {
+            self.core.run()?;
+        }
+        Ok(())
+    }
+
+    /// Reset and let the target run. See [`Bench::reset`].
+    pub fn reset(&mut self) -> Result<(), Error> {
+        let _span = tracing::debug_span!("reset").entered();
+        self.core.reset()?;
+        if self.core.status()?.is_halted() {
+            self.core.run()?;
+        }
+        Ok(())
+    }
+
+    /// Reset and stop at the reset vector. See [`Bench::reset_and_halt`].
+    pub fn reset_and_halt(&mut self, timeout: Duration) -> Result<(), Error> {
+        let _span = tracing::debug_span!("reset_and_halt").entered();
+        self.core.reset_and_halt(timeout)?;
+        Ok(())
+    }
 }
 
 impl Target for Held<'_> {
@@ -746,12 +772,7 @@ impl Bench {
     /// a harness whose whole job is watching a running board should not silently be watching a
     /// stopped one. [`Bench::status`] says which happened; this is the way back.
     pub fn resume(&mut self) -> Result<(), Error> {
-        let _span = tracing::debug_span!("resume").entered();
-        let mut core = acquire(&mut self.session)?;
-        if core.status()?.is_halted() {
-            core.run()?;
-        }
-        Ok(())
+        self.hold()?.resume()
     }
 
     /// Reset and let the target run.
@@ -767,13 +788,7 @@ impl Bench {
     /// last values rather than an error, and a firmware that has stopped looks like one whose
     /// numbers happen not to be changing.
     pub fn reset(&mut self) -> Result<(), Error> {
-        let _span = tracing::debug_span!("reset").entered();
-        let mut core = acquire(&mut self.session)?;
-        core.reset()?;
-        if core.status()?.is_halted() {
-            core.run()?;
-        }
-        Ok(())
+        self.hold()?.reset()
     }
 
     /// Reset and stop at the reset vector, so the caller can write memory before anything runs.
@@ -786,10 +801,7 @@ impl Bench {
     ///
     /// The caller resumes with [`Bench::resume`].
     pub fn reset_and_halt(&mut self, timeout: Duration) -> Result<(), Error> {
-        let _span = tracing::debug_span!("reset_and_halt").entered();
-        let mut core = acquire(&mut self.session)?;
-        core.reset_and_halt(timeout)?;
-        Ok(())
+        self.hold()?.reset_and_halt(timeout)
     }
 
     /// Program an ELF onto the part, adopt it as this session's image, and let it run.
