@@ -919,7 +919,6 @@ impl Bench {
     /// See [`Bench::program_watching`] for why the phases are not one bar.
     pub fn erase_watching(&mut self, mut watch: impl FnMut(Progress)) -> Result<(), Error> {
         let _span = tracing::debug_span!("erase").entered();
-        let _span = tracing::debug_span!("erase").entered();
         let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
         let mut done = 0u64;
         let mut progress = probe_rs::flashing::FlashProgress::new(move |event| {
