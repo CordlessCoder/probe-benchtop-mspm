@@ -22,7 +22,7 @@ license = "MIT OR Apache-2.0"
 #
 # Pinned to a rev on `origin`, not to the local checkout by path: a path dependency would compile
 # whatever is in someone's working tree, which is not a thing two machines can agree on.
-probe-rs = { git = "https://github.com/CordlessCoder/probe-rs", rev = "36d4decba6a83a052009140c8bca94ffebd8203d" }
+probe-rs = { git = "https://github.com/CordlessCoder/probe-rs", rev = "24b3a8305dfe9e9625c2a7944cd1e170158a5271" }
 
 # The ELF's symbol table, read directly. probe-rs parses ELFs for flashing and for defmt, but it
 # does not expose a symbol lookup, and this is the whole schema — see the crate docs.
