@@ -560,6 +560,46 @@ fn maybe(chip: &Option<String>) -> String {
 /// the attach by running the boot ROM's mass erase, but only when the permission is given; without
 /// it the refusal arrives as `MissingPermissions` rather than as anything mentioning the access
 /// port. Walked rather than matched at the top, because the refusal can arrive wrapped.
+/// Whether a first pair of words could be the vector table of an image that could start.
+///
+/// The core takes its initial stack pointer and program counter from the first two words, so an
+/// image able to run at all has a stack pointer inside SRAM and a Thumb program counter inside
+/// flash. **Cheaper and more reliable than looking for erased bytes**, which on this part read back
+/// nondeterministically rather than as a fixed value.
+fn is_vector_table(stack: u32, entry: u32) -> bool {
+    /// Generous on purpose: this separates an image from erased flash, not one part from another.
+    const SRAM: std::ops::RangeInclusive<u32> = 0x2000_0000..=0x2000_FFFF;
+    const FLASH_TOP: u32 = 0x0010_0000;
+
+    SRAM.contains(&stack) && entry & 1 == 1 && entry < FLASH_TOP
+}
+
+#[cfg(test)]
+mod vector_table_tests {
+    use super::is_vector_table;
+
+    /// The real values from an MSPM0L1306 image: stack at the top of SRAM, Thumb entry in flash.
+    #[test]
+    fn a_real_image_looks_like_one() {
+        assert!(is_vector_table(0x2000_1000, 0x0000_00c1));
+    }
+
+    /// **Erased flash, whichever way it happens to read.** Neither pattern can start a core.
+    #[test]
+    fn erased_flash_does_not() {
+        assert!(!is_vector_table(0xFFFF_FFFF, 0xFFFF_FFFF));
+        assert!(!is_vector_table(0x0000_0000, 0x0000_0000));
+    }
+
+    /// A stack pointer outside SRAM, and an entry point without the Thumb bit. Either alone is
+    /// enough to say the image could not run.
+    #[test]
+    fn each_half_is_required() {
+        assert!(!is_vector_table(0x0800_0000, 0x0000_00c1));
+        assert!(!is_vector_table(0x2000_1000, 0x0000_00c0));
+    }
+}
+
 fn refused_for_permission(error: &probe_rs::Error) -> bool {
     // **Two types spell this, and checking only one is why the first version missed it.**
     // `probe_rs::Error::MissingPermissions` is the session's; `ArmError::MissingPermissions` is
@@ -1005,6 +1045,28 @@ impl Bench {
     ///
     /// An error here is a failure to *look*, not a mismatch — a part that holds something else
     /// answers `Ok(false)`.
+    /// Whether the part holds a runnable image at all.
+    ///
+    /// **Not the same question as [`Bench::already_holds`]**, which asks whether it holds *this*
+    /// one. A part that has been erased still answers every read and still resolves every symbol
+    /// an ELF names — so from inside a session it looks exactly like a part holding a different
+    /// build, and the two want opposite treatment: readings of another image are worth showing
+    /// under a warning, readings of erased flash are worth nothing.
+    ///
+    /// Read from the reset vector rather than by looking for erased bytes, because **an erased
+    /// word on this part does not read back as a fixed value** — it is nondeterministic, so
+    /// `0xFF` is not a test for blankness. A vector table is: the core takes its initial stack
+    /// pointer and program counter from the first two words, so an image that could ever start has
+    /// a stack pointer inside SRAM and a program counter inside flash with the Thumb bit set.
+    ///
+    /// A part that fails this cannot execute, whatever else is written on it.
+    pub fn holds_an_image(&mut self) -> Result<bool, Error> {
+        let mut vectors = [0u32; 2];
+        self.core()?.read_32(0x0000_0000, &mut vectors)?;
+        let [stack, entry] = vectors;
+        Ok(is_vector_table(stack, entry))
+    }
+
     pub fn already_holds(&mut self, elf: &Path) -> Result<bool, Error> {
         let _span = tracing::debug_span!("already_holds").entered();
         let mut core = acquire(&mut self.session)?;
