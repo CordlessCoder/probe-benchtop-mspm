@@ -171,8 +171,18 @@ impl Entered {
     /// If any of the four reads fails.
     pub fn read(bench: &mut impl Target, parked: bool) -> Result<Self, Error> {
         let pmodecfg = bench.read_u32(reg::PMODECFG)?;
-        let sysosccfg = bench.read_u32(reg::SYSOSCCFG)?;
-        let mclkcfg = bench.read_u32(reg::MCLKCFG)?;
+        // **The two adjacent ones together, and only those two.** `SYSOSCCFG` and `MCLKCFG` are
+        // consecutive words, so one read covers both and touches nothing else.
+        //
+        // `PMODECFG` is 0x40 further on and stays its own read. Spanning to it would be one
+        // transaction rather than two, and it would also read the fifteen registers in between —
+        // which is safe over RAM and is not a thing to assume over a peripheral window, where a
+        // register can clear on read and a reserved address can fault the bus. The saving is a
+        // third of a millisecond and the question would need the reference manual to answer.
+        let mut pair = [0u8; 8];
+        bench.read_bytes(reg::SYSOSCCFG, &mut pair)?;
+        let sysosccfg = u32::from_le_bytes([pair[0], pair[1], pair[2], pair[3]]);
+        let mclkcfg = u32::from_le_bytes([pair[4], pair[5], pair[6], pair[7]]);
         let scr = bench.read_u32(reg::SCR)?;
 
         Ok(Self {
