@@ -214,6 +214,45 @@ impl Target for Held<'_> {
     }
 }
 
+/// Which of a flash's three phases run.
+///
+/// A flash erases, programs, and reads back. Each can be skipped, and each skip is an assumption
+/// about what is already on the part rather than a preference.
+///
+/// # `verify` is what makes the other two safe
+///
+/// Flash cells only clear bits, so programming over content that was not erased produces something
+/// that is neither the old image nor the new one. Read-back is what turns that from silent
+/// corruption into a failed flash — so **a caller that skips the erase must keep the verify**, and
+/// the two are a pair rather than two independent switches.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FlashOptions {
+    /// Read the flash first, and skip the regions that already hold what is wanted.
+    ///
+    /// Pays a full read to save erasing and programming whatever matched. Worth it when the part
+    /// probably already holds this image and not when it probably does not.
+    pub preverify: bool,
+    /// Do not erase, because the part is already erased.
+    ///
+    /// **The assumption is false the moment anything has been flashed**, so it is a claim about a
+    /// virgin part rather than a general speed-up. Wrong, it is caught by `verify` and by nothing
+    /// else.
+    pub skip_erase: bool,
+    /// Read everything back afterwards and compare it against what was asked for.
+    pub verify: bool,
+}
+
+impl Default for FlashOptions {
+    /// Verify, erase, and assume nothing about what is on the part.
+    fn default() -> Self {
+        Self {
+            preverify: false,
+            skip_erase: false,
+            verify: true,
+        }
+    }
+}
+
 /// Everything that can go wrong, named by what a user did rather than by what a layer returned.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -739,6 +778,27 @@ impl Bench {
         &self.elf
     }
 
+    /// Whether the part already holds this image, byte for byte.
+    ///
+    /// **The cheap half of a flash, asked on its own.** A caller that reflashes the same build —
+    /// a bench rebuilding and pressing the button, a tool restoring a known image — can compare
+    /// first and skip the write when nothing has changed. That is what `probe-rs`'s own CLI does
+    /// for its `--preverify` switch, and it is not what
+    /// [`DownloadOptions::preverify`](probe_rs::flashing::DownloadOptions) does: the flashing
+    /// library declares that field and never reads it, so setting it changes nothing at all.
+    ///
+    /// An error here is a failure to *look*, not a mismatch — a part that holds something else
+    /// answers `Ok(false)`.
+    pub fn already_holds(&mut self, elf: &Path) -> Result<bool, Error> {
+        let _span = tracing::debug_span!("already_holds").entered();
+        let mut core = acquire(&mut self.session)?;
+        match image::verify(&mut core, elf, Verify::Full) {
+            Ok(()) => Ok(true),
+            Err(Error::ImageMismatch { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn symbols(&self) -> &Symbols {
         &self.symbols
     }
@@ -878,7 +938,21 @@ impl Bench {
     /// its own total. [`Progress::fraction`] is therefore the fraction of the *current* phase, and
     /// a caller that wants one number for the whole operation is choosing weights the algorithm
     /// did not supply.
-    pub fn program_watching(&mut self, elf: &Path, mut watch: impl FnMut(Progress)) -> Result<(), Error> {
+    pub fn program_watching(&mut self, elf: &Path, watch: impl FnMut(Progress)) -> Result<(), Error> {
+        self.program_with(elf, FlashOptions::default(), watch)
+    }
+
+    /// [`Bench::program_watching`], choosing which of the three phases actually run.
+    ///
+    /// See [`FlashOptions`] for what each one costs and what it assumes. The defaults are what
+    /// `program_watching` uses and are the only combination that is safe without knowing anything
+    /// about what is already on the part.
+    pub fn program_with(
+        &mut self,
+        elf: &Path,
+        options: FlashOptions,
+        mut watch: impl FnMut(Progress),
+    ) -> Result<(), Error> {
         let symbols = Symbols::load(elf)?;
         let _span = tracing::debug_span!("program").entered();
 
@@ -886,14 +960,16 @@ impl Bench {
         let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
         let mut done = 0u64;
 
-        let mut options = probe_rs::flashing::DownloadOptions::default();
-        options.verify = true;
-        options.progress = probe_rs::flashing::FlashProgress::new(move |event| {
+        let mut download = probe_rs::flashing::DownloadOptions::default();
+        download.verify = options.verify;
+        download.preverify = options.preverify;
+        download.skip_erase = options.skip_erase;
+        download.progress = probe_rs::flashing::FlashProgress::new(move |event| {
             report(event, &mut totals, &mut done, &mut watch);
         });
         let format = probe_rs::flashing::ElfLoader(probe_rs::flashing::ElfOptions::default());
 
-        probe_rs::flashing::download_file_with_options(&mut self.session, elf, format, options).map_err(|source| {
+        probe_rs::flashing::download_file_with_options(&mut self.session, elf, format, download).map_err(|source| {
             Error::Flash {
                 path: elf.to_owned(),
                 source: Box::new(source),
