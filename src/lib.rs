@@ -498,12 +498,6 @@ impl From<probe_rs::flashing::ProgressOperation> for Phase {
     }
 }
 
-impl std::fmt::Display for Phase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.name())
-    }
-}
-
 /// How far through one phase of a flash it is.
 ///
 /// See [`Bench::program_watching`], and note that the phases are not one bar.
@@ -724,6 +718,35 @@ impl Bench {
         &self.symbols
     }
 
+    /// Prove the core is executing by watching the program counter move.
+    ///
+    /// **Invasive, and only for when [`Bench::status`] is not enough.** This halts twice, twenty
+    /// milliseconds apart, and compares the program counter — so it stops a running target twice to
+    /// find out that it was running. On firmware with a timing budget that is an intervention
+    /// rather than an observation, which is why `status` is the default and this is the fallback.
+    ///
+    /// **No caller in this workspace**, and it stays because `status`'s own documentation names it
+    /// as the stronger answer. A fallback that a doc points at and that does not exist is worse
+    /// than an unused function.
+    ///
+    /// `true` if the program counter moved.
+    pub fn prove_running(&mut self) -> Result<bool, Error> {
+        let _span = tracing::debug_span!("prove_running").entered();
+        let mut core = acquire(&mut self.session)?;
+
+        core.halt(std::time::Duration::from_millis(500))?;
+        let first = core.read_core_reg::<u64>(core.program_counter())?;
+        core.run()?;
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        core.halt(std::time::Duration::from_millis(500))?;
+        let second = core.read_core_reg::<u64>(core.program_counter())?;
+        core.run()?;
+
+        Ok(first != second)
+    }
+
     /// What probe-rs says the core is doing, without disturbing it.
     ///
     /// **Non-invasive, and that is the point.** The other way to prove a core is running is to halt
@@ -742,28 +765,6 @@ impl Bench {
     /// exactly as intended, and treating it as dead is the mistake this exists to prevent.
     pub fn is_live(&mut self) -> Result<bool, Error> {
         Ok(matches!(self.status()?, CoreStatus::Running | CoreStatus::Sleeping))
-    }
-
-    /// Halt, read the program counter, resume, and do it again — proving it moved.
-    ///
-    /// **Invasive.** Two halts and two resumes, at a moment this cannot choose. Firmware with wire
-    /// timing to keep will miss it. [`Bench::status`] first; this is for when a core reports
-    /// `Running` and you suspect it is spinning in a fault handler.
-    pub fn prove_running(&mut self) -> Result<bool, Error> {
-        let _span = tracing::debug_span!("prove_running").entered();
-        let mut core = acquire(&mut self.session)?;
-
-        core.halt(std::time::Duration::from_millis(500))?;
-        let first = core.read_core_reg::<u64>(core.program_counter())?;
-        core.run()?;
-
-        std::thread::sleep(std::time::Duration::from_millis(20));
-
-        core.halt(std::time::Duration::from_millis(500))?;
-        let second = core.read_core_reg::<u64>(core.program_counter())?;
-        core.run()?;
-
-        Ok(first != second)
     }
 
     /// Let a halted core run.

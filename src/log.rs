@@ -67,6 +67,10 @@ pub struct Line {
 pub struct Where {
     pub file: String,
     pub line: u32,
+    /// **Carried and not yet read by anything here**, which is deliberate rather than an
+    /// oversight: this module's own opening says filtering by module should be a predicate over a
+    /// field rather than a grep over escapes, and this is that field. A consumer that filters by it
+    /// has not been written; dropping it would mean re-deriving it from the ELF when one is.
     pub module: String,
 }
 
