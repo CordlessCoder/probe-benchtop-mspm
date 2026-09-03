@@ -250,7 +250,7 @@ pub struct FlashOptions {
     /// comparison that passed is stronger evidence the part holds the image than a write that
     /// succeeded, because it read every byte that is actually there.
     ///
-    /// Measured on a Cortex-M0+ with a 23 KB image: 0.57s against the 2.99s it replaces.
+    /// Measured on a Cortex-M0+ with a small image: 0.57s against the 2.99s it replaces.
     ///
     /// This is what `probe-rs`'s CLI means by `--preverify`, and it is deliberately not that
     /// crate's [`DownloadOptions::preverify`](probe_rs::flashing::DownloadOptions) — the flashing
@@ -270,8 +270,8 @@ pub struct FlashOptions {
     /// Erase the **whole** chip, not only the sectors this image occupies.
     ///
     /// **This destroys anything the part was keeping outside the image.** An ordinary flash erases
-    /// sector by sector and so leaves untouched whatever lives in sectors the ELF does not cover —
-    /// which is where an application that persists data across reflashes keeps it. This does not.
+    /// sector by sector and so leaves untouched whatever lives in sectors the ELF does not cover.
+    /// This does not.
     ///
     /// It is offered because wiping that data is sometimes exactly the point: returning a part to
     /// the state it left the vendor in. It is a destructive operation named for its effect, not a
@@ -548,7 +548,7 @@ pub(crate) fn acquire(session: &mut Session) -> Result<probe_rs::Core<'_>, Error
 pub struct Attach {
     /// probe-rs chip name, e.g. `MSPM0L1306`.
     pub chip: String,
-    /// probe-rs probe selector, e.g. `0451:bef3-5:ML130001`.
+    /// probe-rs probe selector, e.g. `0451:bef3-5:<serial>`.
     ///
     /// **Name it whenever more than one probe is on the bus.** Attaching without a selector takes
     /// whichever probe is found first, and asking the wrong part what chip it is can be
@@ -638,9 +638,9 @@ impl From<probe_rs::flashing::ProgressOperation> for Phase {
     }
 }
 
-/// **Used across a crate boundary**, which is what makes it look unused from in here: the CLI
-/// formats a phase with `{}` while nothing in this crate does. A name search for the method will
-/// not find that, and neither will `cargo check` on this crate alone.
+/// **Used across a crate boundary**, so it looks unused from in here: a front end formats a phase
+/// with `{}` while nothing in this crate does. Neither a name search nor `cargo check` on this
+/// crate alone finds that.
 impl std::fmt::Display for Phase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
@@ -908,7 +908,7 @@ impl Bench {
     /// find out that it was running. On firmware with a timing budget that is an intervention
     /// rather than an observation, which is why `status` is the default and this is the fallback.
     ///
-    /// **No caller in this workspace**, and it stays because `status`'s own documentation names it
+    /// **No caller in this crate**, and it stays because `status`'s own documentation names it
     /// as the stronger answer. A fallback that a doc points at and that does not exist is worse
     /// than an unused function.
     ///
@@ -1006,9 +1006,7 @@ impl Bench {
     /// # What is not erased
     ///
     /// Flash erases by sector, and only sectors the image writes into are erased. A sector the ELF
-    /// puts nothing in keeps what it held, which is what makes it safe to re-program a part whose
-    /// flash also holds data written at run time — **provided that data does not share a sector
-    /// with anything loadable.** Sharing one means the whole sector goes.
+    /// puts nothing in keeps whatever it held; a sector it writes any part of is erased whole.
     ///
     /// Unwritten bytes *within* a sector that is erased are not restored, matching `probe-rs
     /// download` without `--restore-unwritten`, so this and the command line put the same thing on
@@ -1140,10 +1138,9 @@ impl Bench {
     ///
     /// # What this is for, and what it is not
     ///
-    /// **Placing data that is not an image**: a calibration record, a configuration block, anything
-    /// a product keeps in flash and a bench has reason to set. [`Bench::program`] writes an ELF and
-    /// adopts it as this session's; this writes bytes and adopts nothing, because bytes are not a
-    /// symbol table.
+    /// **Placing bytes rather than an image.** [`Bench::program`] writes an ELF and adopts it as
+    /// this session's; this writes bytes at an address and adopts nothing, because bytes are not a
+    /// symbol table. What they mean is the caller's business.
     ///
     /// # Sectors, not bytes
     ///
@@ -1161,8 +1158,6 @@ impl Bench {
     pub fn write_flash(&mut self, address: u64, bytes: &[u8]) -> Result<(), Error> {
         self.write_flash_watching(address, bytes, |_| {})
     }
-
-    // **This resets the part when it is done**, and the reason is in `write_flash_watching`.
 
     /// [`Bench::write_flash`], reporting how far through it is.
     pub fn write_flash_watching(
@@ -1210,10 +1205,6 @@ impl Bench {
         self.reset()
     }
 
-    /// Read one value by symbol name, while the core runs.
-    ///
-    /// The ELF's recorded width is checked against `T` first, so asking for the wrong type is an
-    /// error rather than three bytes of a neighbour.
     /// Take the core once, for a run of operations that would otherwise take it each.
     ///
     /// **The one call that makes a multi-symbol read cheap.** See [`Target`] for the measurement;
@@ -1264,27 +1255,6 @@ impl Bench {
     }
 }
 
-/// Resume before detaching.
-///
-/// **Necessary and, on MSPM0, not sufficient — which is worth knowing before relying on it.**
-/// Attaching leaves the core halted, so a session that never resumes and then exits leaves it
-/// halted too. This covers that.
-///
-/// **This used to carry a claim that the part does not run between sessions, and it was wrong.**
-/// The evidence was a counter reading zero after a tool exited and zero again twelve seconds later.
-/// The counter was in `.bss`, which the startup code re-zeroes on every start — so it reads zero
-/// after *any* reset, whether or not the part had been running. It had been.
-///
-/// The cause was in `debug_port_start`. `DPREC0` bits 23:21 are set on a device that has been in a
-/// low-power state, and the MSPM0 sequence treated any of them as a fault and ran a recovery that
-/// begins with a system reset. So attaching to a sleeping part reset it, once per attach, and the
-/// reading was of the reset rather than of the detach. Measured with counters in `.uninit`, which
-/// startup does not touch: four attaches gave four boots before the fix and none after.
-///
-/// **The instruction that used to be here — do not attach a story to it — is the reason this was
-/// findable.** The question stayed open for weeks rather than being closed by a plausible account,
-/// and what settled it was a witness the reset could not clear.
-///
 /// One acquisition per call. For a run of operations, [`Bench::hold`] pays it once.
 impl Target for Bench {
     fn symbols(&self) -> &Symbols {
@@ -1326,6 +1296,26 @@ impl Target for Bench {
     }
 }
 
+/// Resume before detaching.
+///
+/// **Necessary and, on MSPM0, not sufficient — which is worth knowing before relying on it.**
+/// Attaching leaves the core halted, so a session that never resumes and then exits leaves it
+/// halted too. This covers that.
+///
+/// **This used to carry a claim that the part does not run between sessions, and it was wrong.**
+/// The evidence was a counter reading zero after a tool exited and zero again twelve seconds later.
+/// The counter was in `.bss`, which the startup code re-zeroes on every start — so it reads zero
+/// after *any* reset, whether or not the part had been running. It had been.
+///
+/// The cause was in `debug_port_start`. `DPREC0` bits 23:21 are set on a device that has been in a
+/// low-power state, and the MSPM0 sequence treated any of them as a fault and ran a recovery that
+/// begins with a system reset. So attaching to a sleeping part reset it, once per attach, and the
+/// reading was of the reset rather than of the detach. Measured with counters in `.uninit`, which
+/// startup does not touch: four attaches gave four boots before the fix and none after.
+///
+/// **What settled it was a witness the reset could not clear**, rather than a plausible account of
+/// the symptom. The question stayed open for weeks on the strength of accounts.
+///
 /// Best-effort, because a destructor has nowhere to return an error to. A failure here means the
 /// session was already broken, which the caller has heard about by another route.
 impl Drop for Bench {

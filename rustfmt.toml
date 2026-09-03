@@ -1,5 +1,4 @@
-# The same settings the projects that consume this crate use, so a file does not reformat when it
-# moves between them.
+# Chosen so a file formats identically here and in the projects that consume this crate.
 #
 # `group_imports` and `imports_granularity` are unstable, so formatting needs a nightly rustfmt:
 #

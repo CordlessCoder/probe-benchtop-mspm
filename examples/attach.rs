@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --example attach -- <chip> <elf> [symbol]...
-//! PROBE=0451:bef3-5:ML130001 cargo run --example attach -- MSPM0L1306 firmware.elf
+//! PROBE_RS_PROBE=0451:bef3-5:<serial> cargo run --example attach -- MSPM0L1306 firmware.elf
 //! ```
 
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let attach = Attach {
         chip,
-        probe: std::env::var("PROBE").ok(),
+        probe: std::env::var("PROBE_RS_PROBE").ok(),
         ..Attach::default()
     };
 

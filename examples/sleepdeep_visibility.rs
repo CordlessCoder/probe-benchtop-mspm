@@ -49,6 +49,7 @@ fn main() -> anyhow::Result<()> {
     let elf = std::env::args().nth(1).ok_or_else(|| anyhow::anyhow!("usage: <elf>"))?;
     let attach = Attach {
         chip: std::env::var("BENCH_CHIP").unwrap_or_else(|_| "MSPM0L1306".to_owned()),
+        probe: std::env::var("PROBE_RS_PROBE").ok(),
         ..Attach::default()
     };
     let mut bench = Bench::attach(&attach, std::path::Path::new(&elf))?;

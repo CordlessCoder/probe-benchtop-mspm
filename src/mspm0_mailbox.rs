@@ -38,14 +38,14 @@
 //! # It works, measured 2026-08-31
 //!
 //! Before that day nothing had driven this mailbox from a host in either direction, and the CPU end
-//! had never taken a word a probe put there. Now both have. On an MSPM0L1306, with a firmware that
-//! polls `try_receive` every 500 ms:
+//! had never taken a word a probe put there. Now both have. On an MSPM0L1306, against a firmware
+//! that polls `try_receive` in its main loop:
 //!
 //! | | |
 //! | --- | --- |
 //! | SEC-AP `IDR` | `0x002E0000` |
 //! | host writes `TXDATA` | `TXCTL.TRANSMIT` sets |
-//! | ~400 ms later | `TRANSMIT` clears, so the CPU read it |
+//! | shortly after | `TRANSMIT` clears, so the CPU read it |
 //! | the CPU replies | `RXCTL.RECEIVE` sets, and the exact word it sent comes back |
 //!
 //! The word that returned was the firmware's own computed reply rather than anything left in a

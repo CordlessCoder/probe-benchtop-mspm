@@ -129,7 +129,7 @@ impl Pin {
     /// Address of this pin's `PINCM`, for the part this session is attached to.
     ///
     /// **A table, because it is not arithmetic.** `PINCM` equals the pin number plus one on 14 of
-    /// the 43 MSPM0 parts and on the other 29 the difference ranges from -27 to +28. A second port
+    /// the 43 MSPM0 parts and on the other 29 the difference ranges from -27 to +78. A second port
     /// continues the same numbering rather than restarting — on an `MSPM0L2228`, `PB0` is
     /// `PINCM12` — so neither a per-port base nor a constant offset recovers it. See
     /// [`crate::mspm0_parts`].
@@ -459,7 +459,7 @@ pub fn input(bench: &mut Held<'_>, pin: Pin, pull: Pull) -> Result<State, Error>
 ///
 /// The output driver goes off before the mux is restored, for the same reason it went on last.
 ///
-/// **No caller in this workspace yet**, and it stays because [`observe`] and [`input`] are written
+/// **No caller in this crate yet**, and it stays because [`observe`] and [`input`] are written
 /// as borrows — each says in its own documentation that this is what gives the pin back. A borrow
 /// with no return is a different API, and a narrower one.
 pub fn restore(bench: &mut Held<'_>, pin: Pin, was: &State) -> Result<(), Error> {
@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn observing_keeps_the_function_and_taking_the_pin_does_not() {
         // A pad a peripheral owns, driving, with a pull up.
-        let owned = (7 << 0) | PC | PIPU;
+        let owned = (7 & PF_MASK) | PC | PIPU;
 
         let observed = pincm_observing(owned);
         assert_eq!(observed & PF_MASK, 7, "observe must not move the mux");
