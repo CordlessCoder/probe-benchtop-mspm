@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "MIT OR Apache-2.0"
+description = "Drive a microcontroller over a debug probe while its firmware runs: read and write symbols by name, drive pins, flash, and decode a defmt log."
+readme = "README.md"
+# `repository` is deliberately absent until there is a URL to put in it. A field pointing nowhere is
+# worse than an absent one.
 
 # Driving a Cortex-M board over SWD from a program rather than a shell: attach, reset, prove the
 # core is running, resolve a symbol out of the ELF, and read or write it while the core runs.
