@@ -36,9 +36,11 @@ const VC_CORERESET: u32 = 1 << 0;
 
 fn main() -> anyhow::Result<()> {
     let elf = std::path::PathBuf::from(std::env::args().nth(1).expect("an inert ELF"));
-    let address = match std::env::args().nth(2) {
-        Some(text) => u64::from_str_radix(text.trim_start_matches("0x"), 16)?,
-        None => panic!("pass a flash address to write, in hex"),
+    // Required rather than defaulted. A default here is a claim about where the caller's data
+    // lives, and this crate has no business holding one.
+    let address = {
+        let text = std::env::args().nth(2).expect("a flash address to write, in hex");
+        u64::from_str_radix(text.trim_start_matches("0x"), 16)?
     };
 
     let attach = Attach {
