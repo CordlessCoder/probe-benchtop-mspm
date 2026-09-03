@@ -1,4 +1,8 @@
-//! Driving MSPM0 pins from the debugger, on any image.
+//! Driving MSPM0 pins from the debugger, on any image and on any port.
+//!
+//! Ports are uniform — the block is at `0x400A_0000` plus `0x2000` each, on all 43 parts in the
+//! catalog. The pin mux is not: which `PINCM` register a pin uses is a per-part table, so
+//! everything here needs the chip name the session was attached with. See [`crate::mspm0_parts`].
 //!
 //! Device knowledge, not application knowledge: which register holds what, and which pins must
 //! never be driven. Every address and field position below is from the metapac the HAL itself uses,
@@ -42,8 +46,16 @@
 
 use crate::{Error, Held, Target};
 
-/// `GPIOA`, from the metapac.
-const GPIOA: u64 = 0x400A_0000;
+/// `GPIOA`, from the metapac. Every port is this plus [`PORT_STRIDE`] per port.
+const GPIO_BASE: u64 = 0x400A_0000;
+
+/// Between one GPIO port and the next.
+///
+/// **Checked across all 43 parts in the catalog**: `GPIOA` at `0x400A_0000`, `GPIOB` at
+/// `0x400A_2000` on the 29 that have one, `GPIOC` at `0x400A_4000` on the 8 that do. The register
+/// offsets below the base are the block's rather than the device's, so a port is a base address and
+/// nothing else.
+const PORT_STRIDE: u64 = 0x2000;
 /// `IOMUX`, from the metapac. `PINCM[n]` is at `+0x04 + n*4`.
 const IOMUX: u64 = 0x4042_8000;
 
@@ -82,39 +94,73 @@ const HIZ1: u32 = 1 << 25;
 /// session. This is the one thing here that is refused rather than warned about.
 pub const DEBUG_PINS: [u8; 2] = [19, 20];
 
-/// One port-A pin, by number.
+/// One pin, as `port * 32 + index` — so `Pin(11)` is `PA11` and `Pin(32)` is `PB0`.
+///
+/// **The same flat encoding the HAL uses** for its own `PIN_PORT`, so a number means the same thing
+/// on both sides of the wire. Port A is 0, which is what keeps every existing `Pin(n)` meaning what
+/// it did.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Pin(pub u8);
 
 impl Pin {
-    /// Address of this pin's `PINCM`.
+    /// Build a pin from a port and an index within it.
+    #[must_use]
+    pub const fn on(port: u8, index: u8) -> Self {
+        Self(port * 32 + index)
+    }
+
+    /// 0 for `PA`, 1 for `PB`, 2 for `PC`.
+    #[must_use]
+    pub const fn port(self) -> u8 {
+        self.0 / 32
+    }
+
+    /// The pin's number within its port.
+    #[must_use]
+    pub const fn index(self) -> u8 {
+        self.0 % 32
+    }
+
+    /// Base of the GPIO block this pin belongs to.
+    const fn gpio(self) -> u64 {
+        GPIO_BASE + self.port() as u64 * PORT_STRIDE
+    }
+
+    /// Address of this pin's `PINCM`, for the part this session is attached to.
     ///
-    /// **The index is the pin number, and the temptation is to write `n + 1`.** TI numbers these
-    /// registers from one — `PINCM23` is `PA22` — so every datasheet, header and comment says
-    /// `n + 1`, and the metapac's accessor takes a zero-based array index instead. Both are right
-    /// in their own frame and they differ by one, which is the whole of this bug: written `n + 1`,
-    /// every read here returned the *neighbouring* pin's mux, and the last pin's write went to a
-    /// register the package does not implement and did nothing.
+    /// **A table, because it is not arithmetic.** `PINCM` equals the pin number plus one on 14 of
+    /// the 43 MSPM0 parts and on the other 29 the difference ranges from -27 to +28. A second port
+    /// continues the same numbering rather than restarting — on an `MSPM0L2228`, `PB0` is
+    /// `PINCM12` — so neither a per-port base nor a constant offset recovers it. See
+    /// [`crate::mspm0_parts`].
     ///
-    /// Taken from the table the HAL generates for this chip, which is identity for the L1306. It is
-    /// a table rather than arithmetic because some parts in this family are neither.
-    const fn pincm(self) -> u64 {
-        IOMUX + 0x04 + self.0 as u64 * 4
+    /// **The one-based value is already the offset.** TI numbers these registers from one and the
+    /// array starts one register into the block, so the address is `IOMUX + pincm * 4`. Adding a
+    /// further `0x04` lands one register high on every pin — which reads as the neighbouring pin's
+    /// mux, and looks entirely plausible because the neighbour is usually configured too.
+    fn pincm(self, chip: &str) -> Result<u64, Error> {
+        crate::mspm0_parts::pincm(chip, self.port(), self.index())
+            .map(|pincm| IOMUX + pincm as u64 * 4)
+            .ok_or_else(|| Error::NoPinMap {
+                chip: chip.to_owned(),
+                pin: self.to_string(),
+            })
     }
 
     const fn mask(self) -> u32 {
-        1 << self.0
+        1 << self.index()
     }
 
+    /// **`SWDIO` and `SWCLK` are port A**, so the port has to match as well as the number.
     #[must_use]
     pub const fn is_debug(self) -> bool {
-        self.0 == DEBUG_PINS[0] || self.0 == DEBUG_PINS[1]
+        self.port() == 0 && (self.index() == DEBUG_PINS[0] || self.index() == DEBUG_PINS[1])
     }
 }
 
 impl std::fmt::Display for Pin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PA{}", self.0)
+        write!(f, "P{}{}", (b'A' + self.port()) as char, self.index())
     }
 }
 
@@ -170,11 +216,11 @@ impl State {
 
 /// Read one pin without disturbing it.
 pub fn read(bench: &mut Held<'_>, pin: Pin) -> Result<State, Error> {
-    power_on(bench)?;
-    let pincm = bench.read_u32(pin.pincm())?;
-    let doe = bench.read_u32(GPIOA + DOE31_0)?;
-    let dout = bench.read_u32(GPIOA + DOUT31_0)?;
-    let din = bench.read_u32(GPIOA + DIN31_0)?;
+    power_on(bench, pin)?;
+    let pincm = bench.read_u32(pin.pincm(bench.chip())?)?;
+    let doe = bench.read_u32(pin.gpio() + DOE31_0)?;
+    let dout = bench.read_u32(pin.gpio() + DOUT31_0)?;
+    let din = bench.read_u32(pin.gpio() + DIN31_0)?;
 
     Ok(State {
         pincm,
@@ -197,52 +243,87 @@ pub fn read(bench: &mut Held<'_>, pin: Pin) -> Result<State, Error> {
 ///
 /// The bank's reset is deliberately not asserted. `PWREN` alone is enough, measured, and asserting
 /// reset would clear the pin state of a firmware that owns pins in this bank.
-pub fn power_on(bench: &mut Held<'_>) -> Result<bool, Error> {
-    if bench.read_u32(GPIOA + PWREN)? & PWREN_ENABLE != 0 {
+pub fn power_on(bench: &mut Held<'_>, pin: Pin) -> Result<bool, Error> {
+    power_port(bench, pin.port())
+}
+
+/// [`power_on`] for a whole port, which is what a sweep across one wants.
+fn power_port(bench: &mut Held<'_>, port: u8) -> Result<bool, Error> {
+    let base = GPIO_BASE + port as u64 * PORT_STRIDE;
+    if bench.read_u32(base + PWREN)? & PWREN_ENABLE != 0 {
         return Ok(false);
     }
-    bench.write_u32(GPIOA + PWREN, PWREN_KEY | PWREN_ENABLE)?;
+    bench.write_u32(base + PWREN, PWREN_KEY | PWREN_ENABLE)?;
     // The registers behind `PWREN` stay isolated for a few ULPCLK cycles and a write that lands in
     // that window is dropped — which is the same silent failure one layer down.
     std::thread::sleep(std::time::Duration::from_millis(1));
     Ok(true)
 }
 
-/// Read every port-A pin in one pass.
+/// Read every pin the part brings out, in one pass per port.
 ///
-/// Four register reads rather than four per pin, which is what makes a pin table refreshable at a
-/// useful rate over SWD.
+/// Four register reads per port rather than four per pin, which is what makes a pin table
+/// refreshable at a useful rate over SWD.
 pub fn read_all(bench: &mut Held<'_>) -> Result<Vec<(Pin, State)>, Error> {
     let _span = tracing::debug_span!("gpio_read_all").entered();
-    power_on(bench)?;
-    let doe = bench.read_u32(GPIOA + DOE31_0)?;
-    let dout = bench.read_u32(GPIOA + DOUT31_0)?;
-    let din = bench.read_u32(GPIOA + DIN31_0)?;
+    let chip = bench.chip().to_owned();
+    let Some(pins) = crate::mspm0_parts::pins(&chip) else {
+        return Err(Error::NoPinMap {
+            chip,
+            pin: "any".to_owned(),
+        });
+    };
+    let pins: Vec<(u8, u8)> = pins.collect();
 
-    // **One block transfer, not thirty-two word reads.** The `PINCM` array is contiguous, and on
-    // this link taking the core costs about three times what moving four bytes does — so a loop of
-    // `read_u32` here spent most of a pin sweep acquiring rather than reading. Measured on one
-    // board and probe: 288 ms as a loop against 46 ms this way, and 35 acquisitions against 4.
-    let mut raw = [0u8; 4 * 32];
-    bench.read_bytes(Pin(0).pincm(), &mut raw)?;
-
-    let mut out = Vec::with_capacity(32);
-    for n in 0..32u8 {
-        let pin = Pin(n);
-        let at = n as usize * 4;
-        let pincm = u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
-        out.push((
-            pin,
-            State {
-                pincm,
-                driving: doe & pin.mask() != 0,
-                output: dout & pin.mask() != 0,
-                input: (pincm & INENA != 0).then_some(din & pin.mask() != 0),
-                function: (pincm & PF_MASK) as u8,
-                connected: pincm & PC != 0,
-            },
-        ))
+    // **One block transfer for the whole `PINCM` array, not one read per pin.** The array is
+    // contiguous in `PINCM` *number*, which is what makes a single transfer possible even where the
+    // pin-to-`PINCM` mapping is not ordered. On this link taking the core costs about three times
+    // what moving four bytes does, so a loop of `read_u32` spent most of a sweep acquiring rather
+    // than reading: measured at 288 ms as a loop against 46 ms this way, and 35 acquisitions
+    // against 4.
+    let highest = pins
+        .iter()
+        .filter_map(|(port, index)| crate::mspm0_parts::pincm(&chip, *port, *index))
+        .max()
+        .unwrap_or(0);
+    let mut raw = vec![0u8; highest as usize * 4];
+    if !raw.is_empty() {
+        bench.read_bytes(IOMUX + 4, &mut raw)?;
     }
+
+    let mut out = Vec::with_capacity(pins.len());
+    let mut ports: Vec<u8> = pins.iter().map(|(port, _)| *port).collect();
+    ports.dedup();
+    for port in ports {
+        power_port(bench, port)?;
+        let base = GPIO_BASE + port as u64 * PORT_STRIDE;
+        let doe = bench.read_u32(base + DOE31_0)?;
+        let dout = bench.read_u32(base + DOUT31_0)?;
+        let din = bench.read_u32(base + DIN31_0)?;
+
+        for (_, index) in pins.iter().filter(|(p, _)| *p == port) {
+            let pin = Pin::on(port, *index);
+            // One-based, and the array starts one register in — so the byte offset is
+            // `(pincm - 1) * 4` into a block that began at `IOMUX + 4`.
+            let Some(number) = crate::mspm0_parts::pincm(&chip, port, *index) else {
+                continue;
+            };
+            let at = (number as usize - 1) * 4;
+            let pincm = u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+            out.push((
+                pin,
+                State {
+                    pincm,
+                    driving: doe & pin.mask() != 0,
+                    output: dout & pin.mask() != 0,
+                    input: (pincm & INENA != 0).then_some(din & pin.mask() != 0),
+                    function: (pincm & PF_MASK) as u8,
+                    connected: pincm & PC != 0,
+                },
+            ))
+        }
+    }
+    out.sort_by_key(|(pin, _)| *pin);
     Ok(out)
 }
 
@@ -264,12 +345,12 @@ pub fn drive(bench: &mut Held<'_>, pin: Pin, level: bool) -> Result<State, Error
     let was = read(bench, pin)?;
 
     let set = if level { DOUTSET31_0 } else { DOUTCLR31_0 };
-    bench.write_u32(GPIOA + set, pin.mask())?;
+    bench.write_u32(pin.gpio() + set, pin.mask())?;
 
     let pincm = (was.pincm & !(PF_MASK | HIZ1)) | GPIO_PF | PC | INENA;
-    bench.write_u32(pin.pincm(), pincm)?;
+    bench.write_u32(pin.pincm(bench.chip())?, pincm)?;
 
-    bench.write_u32(GPIOA + DOESET31_0, pin.mask())?;
+    bench.write_u32(pin.gpio() + DOESET31_0, pin.mask())?;
     Ok(was)
 }
 
@@ -346,7 +427,7 @@ pub fn observe(bench: &mut Held<'_>, pin: Pin) -> Result<State, Error> {
     }
     // `read` powers the bank, so this does not.
     let was = read(bench, pin)?;
-    bench.write_u32(pin.pincm(), pincm_observing(was.pincm))?;
+    bench.write_u32(pin.pincm(bench.chip())?, pincm_observing(was.pincm))?;
     Ok(was)
 }
 
@@ -368,9 +449,9 @@ pub fn input(bench: &mut Held<'_>, pin: Pin, pull: Pull) -> Result<State, Error>
 
     // Off first: a pad that stops driving before it changes function never drives an unintended
     // level, where the other order would put `DOUT` on the pin for the width of one bus write.
-    bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
+    bench.write_u32(pin.gpio() + DOECLR31_0, pin.mask())?;
 
-    bench.write_u32(pin.pincm(), pincm_as_input(was.pincm, pull))?;
+    bench.write_u32(pin.pincm(bench.chip())?, pincm_as_input(was.pincm, pull))?;
     Ok(was)
 }
 
@@ -389,14 +470,14 @@ pub fn restore(bench: &mut Held<'_>, pin: Pin, was: &State) -> Result<(), Error>
         return Err(Error::DebugPin { pin: pin.0 });
     }
     if !was.driving {
-        power_on(bench)?;
-        bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
+        power_on(bench, pin)?;
+        bench.write_u32(pin.gpio() + DOECLR31_0, pin.mask())?;
     }
-    bench.write_u32(pin.pincm(), was.pincm)?;
+    bench.write_u32(pin.pincm(bench.chip())?, was.pincm)?;
     if was.driving {
         let set = if was.output { DOUTSET31_0 } else { DOUTCLR31_0 };
-        bench.write_u32(GPIOA + set, pin.mask())?;
-        bench.write_u32(GPIOA + DOESET31_0, pin.mask())?;
+        bench.write_u32(pin.gpio() + set, pin.mask())?;
+        bench.write_u32(pin.gpio() + DOESET31_0, pin.mask())?;
     }
     Ok(())
 }
@@ -406,12 +487,12 @@ pub fn release(bench: &mut Held<'_>, pin: Pin) -> Result<(), Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
-    power_on(bench)?;
-    bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
+    power_on(bench, pin)?;
+    bench.write_u32(pin.gpio() + DOECLR31_0, pin.mask())?;
     // `PC` clear is `PC_UNCONNECTED` in TI's own naming, and is where an analog net rests. Pulls
     // are cleared with it so nothing is left holding the node.
-    let pincm = bench.read_u32(pin.pincm())? & !(PC | INENA | PIPU | PIPD);
-    bench.write_u32(pin.pincm(), pincm)
+    let pincm = bench.read_u32(pin.pincm(bench.chip())?)? & !(PC | INENA | PIPU | PIPD);
+    bench.write_u32(pin.pincm(bench.chip())?, pincm)
 }
 
 #[cfg(test)]
@@ -464,17 +545,50 @@ mod tests {
 
     use super::*;
 
-    /// **The index is the pin number**, against every document that says `n + 1`.
+    /// **The addresses this produced before the table existed**, on the part it was written
+    /// against. The lookup replaced `IOMUX + 0x04 + n * 4`, and on an L1306 it has to agree with it
+    /// exactly or the change was not a generalisation but a regression.
     ///
-    /// Written the other way, a read returns the neighbouring pin's mux — which looks entirely
-    /// plausible, because the neighbour is usually configured too.
+    /// Written a register out either way, a read returns the neighbouring pin's mux — which looks
+    /// entirely plausible, because the neighbour is usually configured too.
     #[test]
-    fn pincm_is_indexed_by_the_pin_number() {
-        assert_eq!(Pin(0).pincm(), IOMUX + 0x04);
-        assert_eq!(Pin(11).pincm(), IOMUX + 0x04 + 11 * 4);
-        assert_eq!(Pin(27).pincm(), IOMUX + 0x04 + 27 * 4);
+    fn the_regular_part_keeps_the_addresses_the_arithmetic_gave() {
+        for n in [0u8, 11, 27] {
+            assert_eq!(
+                Pin(n).pincm("mspm0l1306").unwrap(),
+                IOMUX + 0x04 + n as u64 * 4,
+                "PA{n}"
+            );
+        }
         // The off-by-one this cost an afternoon to find.
-        assert_ne!(Pin(11).pincm(), IOMUX + 0x04 + 12 * 4);
+        assert_ne!(Pin(11).pincm("mspm0l1306").unwrap(), IOMUX + 0x04 + 12 * 4);
+    }
+
+    /// **The reason the table exists.** On this part `PA2` is `PINCM7`, so the arithmetic that is
+    /// right for an L1306 lands four registers away.
+    #[test]
+    fn an_irregular_part_disagrees_with_the_arithmetic() {
+        let real = Pin(2).pincm("mspm0l2228").unwrap();
+        assert_eq!(real, IOMUX + 7 * 4);
+        assert_ne!(real, IOMUX + 0x04 + 2 * 4);
+    }
+
+    /// A second port continues the same `PINCM` numbering rather than restarting, and lands in the
+    /// next GPIO block.
+    #[test]
+    fn a_second_port_moves_both_the_block_and_the_pincm() {
+        let pb0 = Pin::on(1, 0);
+        assert_eq!(pb0.to_string(), "PB0");
+        assert_eq!(pb0.gpio(), GPIO_BASE + PORT_STRIDE);
+        assert_eq!(pb0.pincm("mspm0l2228").unwrap(), IOMUX + 12 * 4);
+        assert_eq!(Pin(0).gpio(), GPIO_BASE);
+    }
+
+    /// **Refused rather than guessed.** A fallback would mux the wrong pad on 29 of the 43 parts.
+    #[test]
+    fn an_unknown_part_is_an_error() {
+        assert!(Pin(0).pincm("stm32f103").is_err());
+        assert!(Pin::on(2, 0).pincm("mspm0l1306").is_err());
     }
 
     #[test]

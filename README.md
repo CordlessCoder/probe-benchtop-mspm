@@ -35,9 +35,25 @@ Which symbols exist, what they mean and what a sweep of one is for all belong in
 boundary is why it lives outside any firmware repository, and it is what lets more than one project
 use it.
 
-It does know a fair amount about **MSPM0 silicon**, because that is what it has been used against:
-GPIO through `PINCM`, the application mailbox on SEC-AP, `CPUSS.CTL`, the SYSCTL power registers,
-and the NONMAIN/BCR layout. Those live in their own modules and nothing else depends on them.
+It does know about **MSPM0 silicon**. GPIO through `PINCM` and the application mailbox on SEC-AP
+live in their own modules; `CPUSS.CTL`, the SYSCTL power registers and the NONMAIN/BCR layout appear
+in examples. Nothing else depends on any of it.
+
+**How far that reaches, checked rather than assumed.** The GPIO block is at `0x400A_0000` plus
+`0x2000` per port on all 43 parts in the catalog, and DEBUGSS is access port 2 with the same
+register offsets and the same base on all of them — that one is stated in four separate reference
+manuals, not inferred from a board.
+
+**The pin-to-`PINCM` mapping is the part that is not family-wide, and it is a table for a reason.**
+It equals the pin number plus one on 14 parts; on the other 29 the difference ranges from −27 to
++28, and a second port continues the same numbering rather than restarting. So there is no
+arithmetic to be clever with, and a part the table does not know is an error rather than a guess —
+guessing would silently mux the wrong pad on two thirds of the family. `src/mspm0_parts.rs` is
+generated from the mspm0-data catalog by `tools/generate_iomux.py`.
+
+One value here really is one board's: the SEC-AP `IDR`. No reference manual states it, so it is a
+measurement rather than a constant, and it is used as an identity read rather than something to
+compare against.
 
 ## Flashing
 

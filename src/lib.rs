@@ -16,6 +16,14 @@
 //! generated header anybody keeps in step by hand. The symbol table cannot drift from the image
 //! because it *is* the image. See [`Symbols`].
 //!
+//! # What is device-specific, and how much
+//!
+//! Attach, reset, symbols, peek and poke, and flashing are Cortex-M and probe-rs, and care about
+//! nothing below that. [`mspm0_gpio`] and [`mspm0_mailbox`] do: they drive real peripherals and are
+//! MSPM0-only. Both work across the family rather than on one part — with one exception, which is
+//! that a pin's `PINCM` register is a per-part table rather than arithmetic. [`mspm0_parts`] holds
+//! it, and a part it does not know is refused rather than guessed at.
+//!
 //! # No GUI dependency, ever
 //!
 //! A CI runner links this directly. Anything that needs a window belongs above it.
@@ -33,6 +41,7 @@ mod image;
 pub mod log;
 pub mod mspm0_gpio;
 pub mod mspm0_mailbox;
+pub mod mspm0_parts;
 mod symbols;
 mod value;
 
@@ -117,9 +126,16 @@ pub trait Target {
 pub struct Held<'a> {
     core: probe_rs::Core<'a>,
     symbols: &'a Symbols,
+    chip: &'a str,
 }
 
 impl<'a> Held<'a> {
+    /// The chip this session was attached as, lowercased.
+    #[must_use]
+    pub fn chip(&self) -> &str {
+        self.chip
+    }
+
     /// The core itself, for an operation this trait does not cover.
     ///
     /// Reach for it where a probe-rs API is needed directly — following RTT is the case here.
@@ -308,6 +324,12 @@ pub enum Flashed {
 pub enum Error {
     #[error("a flash that neither erases nor verifies would not be checked by anything")]
     UncheckedFlash,
+
+    /// **A pin's `PINCM` is a per-part table, so an unknown part cannot be guessed at.** It equals
+    /// the pin number plus one on 14 MSPM0 parts and is not an affine function of it on the other
+    /// 29, so a fallback would silently mux the wrong pad on two thirds of the family.
+    #[error("no pin map for {chip}: {pin} cannot be resolved to a PINCM register")]
+    NoPinMap { chip: String, pin: String },
 
     #[error("cannot read {path}")]
     ElfRead {
@@ -748,6 +770,12 @@ pub struct Bench {
     session: Session,
     symbols: Symbols,
     elf: PathBuf,
+    /// The chip name this was attached as, lowercased.
+    ///
+    /// **Kept because some device facts are per part and not derivable.** The `PINCM` a pin uses is
+    /// the one that forced it: it is a table per part rather than arithmetic, so anything touching
+    /// the pin mux has to know which part it is talking to. See [`mspm0_parts`].
+    chip: String,
     resume_on_drop: bool,
 }
 
@@ -815,6 +843,7 @@ impl Bench {
             session,
             symbols,
             elf: elf.to_owned(),
+            chip: attach.chip.to_lowercase(),
             resume_on_drop: true,
         };
 
@@ -829,6 +858,12 @@ impl Bench {
     /// The ELF this was attached with.
     pub fn elf(&self) -> &Path {
         &self.elf
+    }
+
+    /// The chip name this was attached as, lowercased.
+    #[must_use]
+    pub fn chip(&self) -> &str {
+        &self.chip
     }
 
     /// Whether the part already holds this image, byte for byte.
@@ -1177,10 +1212,16 @@ impl Bench {
     ///
     /// The core is given back when the [`Held`] drops. Hold it for a pass, not for the program.
     pub fn hold(&mut self) -> Result<Held<'_>, Error> {
-        // Disjoint fields, so the symbol table stays readable while the session is borrowed.
+        // Disjoint fields, so the symbol table and the chip name stay readable while the session
+        // is borrowed.
         let symbols = &self.symbols;
+        let chip = self.chip.as_str();
         let core = acquire(&mut self.session)?;
-        Ok(Held { core, symbols })
+        Ok(Held {
+            core,
+            symbols,
+            chip,
+        })
     }
 
     /// Take core 0.

@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
     // takes a held core, because taking it per call is three probe transactions each time.
     let (powered, doe) = {
         let mut held = bench.hold()?;
-        let powered = mspm0_gpio::power_on(&mut held)?;
+        let powered = mspm0_gpio::power_on(&mut held, pin)?;
         mspm0_gpio::drive(&mut held, pin, true)?;
         (powered, held.read_u32(DOE)?)
     };
