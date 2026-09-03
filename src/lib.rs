@@ -280,6 +280,16 @@ pub struct FlashOptions {
     ///
     /// Implies a write: [`FlashOptions::skip_if_unchanged`] is ignored, because a part that
     /// already holds the image still has the other sectors to erase.
+    ///
+    /// # Not every part can do it, and the one this was written against cannot
+    ///
+    /// A chip erase needs an `EraseChip` entry point in the flash algorithm, or a device-specific
+    /// erase sequence. Where neither exists the request fails rather than falling back, and the
+    /// sector-by-sector path is the only one there is.
+    ///
+    /// **`MSPM0L` is such a family** — alone among the MSPM0 targets, its algorithms carry no
+    /// `pc_erase_all`. So this option has never run here, and it is documented rather than
+    /// exercised. Treat it as untested until it has failed or succeeded in front of you.
     pub whole_chip: bool,
 }
 
@@ -1217,11 +1227,7 @@ impl Bench {
         let symbols = &self.symbols;
         let chip = self.chip.as_str();
         let core = acquire(&mut self.session)?;
-        Ok(Held {
-            core,
-            symbols,
-            chip,
-        })
+        Ok(Held { core, symbols, chip })
     }
 
     /// Take core 0.
