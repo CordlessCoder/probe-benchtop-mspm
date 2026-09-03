@@ -498,6 +498,15 @@ impl From<probe_rs::flashing::ProgressOperation> for Phase {
     }
 }
 
+/// **Used across a crate boundary**, which is what makes it look unused from in here: the CLI
+/// formats a phase with `{}` while nothing in this crate does. A name search for the method will
+/// not find that, and neither will `cargo check` on this crate alone.
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// How far through one phase of a flash it is.
 ///
 /// See [`Bench::program_watching`], and note that the phases are not one bar.
