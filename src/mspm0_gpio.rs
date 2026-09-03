@@ -40,7 +40,7 @@
 //! because a bench exists to try things and the tool has no way to know what is wired to a board.
 //! The debug pins are different in kind: driving them removes the ability to undo it.
 
-use crate::{Error, Target};
+use crate::{Error, Held, Target};
 
 /// `GPIOA`, from the metapac.
 const GPIOA: u64 = 0x400A_0000;
@@ -169,7 +169,7 @@ impl State {
 }
 
 /// Read one pin without disturbing it.
-pub fn read(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
+pub fn read(bench: &mut Held<'_>, pin: Pin) -> Result<State, Error> {
     power_on(bench)?;
     let pincm = bench.read_u32(pin.pincm())?;
     let doe = bench.read_u32(GPIOA + DOE31_0)?;
@@ -197,7 +197,7 @@ pub fn read(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
 ///
 /// The bank's reset is deliberately not asserted. `PWREN` alone is enough, measured, and asserting
 /// reset would clear the pin state of a firmware that owns pins in this bank.
-pub fn power_on(bench: &mut impl Target) -> Result<bool, Error> {
+pub fn power_on(bench: &mut Held<'_>) -> Result<bool, Error> {
     if bench.read_u32(GPIOA + PWREN)? & PWREN_ENABLE != 0 {
         return Ok(false);
     }
@@ -212,7 +212,7 @@ pub fn power_on(bench: &mut impl Target) -> Result<bool, Error> {
 ///
 /// Four register reads rather than four per pin, which is what makes a pin table refreshable at a
 /// useful rate over SWD.
-pub fn read_all(bench: &mut impl Target) -> Result<Vec<(Pin, State)>, Error> {
+pub fn read_all(bench: &mut Held<'_>) -> Result<Vec<(Pin, State)>, Error> {
     let _span = tracing::debug_span!("gpio_read_all").entered();
     power_on(bench)?;
     let doe = bench.read_u32(GPIOA + DOE31_0)?;
@@ -256,7 +256,7 @@ pub fn read_all(bench: &mut impl Target) -> Result<Vec<(Pin, State)>, Error> {
 /// The input buffer is left on, so [`read`] keeps reporting what the pad is really at. That is
 /// worth the microamps here: a driven pin reading back the opposite level is how contention with
 /// something external announces itself, and with the buffer off there is nothing to see.
-pub fn drive(bench: &mut impl Target, pin: Pin, level: bool) -> Result<State, Error> {
+pub fn drive(bench: &mut Held<'_>, pin: Pin, level: bool) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
@@ -340,7 +340,7 @@ const fn pincm_as_input(was: u32, pull: Pull) -> u32 {
 /// what says whether that happened, and [`restore`] is what undoes it.
 ///
 /// Pulls, the output driver and the mux are all left exactly as found.
-pub fn observe(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
+pub fn observe(bench: &mut Held<'_>, pin: Pin) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
@@ -359,7 +359,7 @@ pub fn observe(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
 /// **Safe against contention in the one direction that matters.** The output driver is cleared
 /// before the mux moves, so there is no instant at which this pad drives a level chosen by whatever
 /// was in `DOUT`. [`drive`] has to do it the other way round and says so.
-pub fn input(bench: &mut impl Target, pin: Pin, pull: Pull) -> Result<State, Error> {
+pub fn input(bench: &mut Held<'_>, pin: Pin, pull: Pull) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
@@ -381,7 +381,7 @@ pub fn input(bench: &mut impl Target, pin: Pin, pull: Pull) -> Result<State, Err
 /// **No caller in this workspace yet**, and it stays because [`observe`] and [`input`] are written
 /// as borrows — each says in its own documentation that this is what gives the pin back. A borrow
 /// with no return is a different API, and a narrower one.
-pub fn restore(bench: &mut impl Target, pin: Pin, was: &State) -> Result<(), Error> {
+pub fn restore(bench: &mut Held<'_>, pin: Pin, was: &State) -> Result<(), Error> {
     // **The guard the other mutators have and this one did not.** `State` is public with public
     // fields, so a caller can hand this a pin it never read — and this is the one entry point that
     // would then reconfigure `PA19` or `PA20` and take the debug port down mid-session.
@@ -402,7 +402,7 @@ pub fn restore(bench: &mut impl Target, pin: Pin, was: &State) -> Result<(), Err
 }
 
 /// Stop driving a pin and leave it disconnected, which is where an unused net rests.
-pub fn release(bench: &mut impl Target, pin: Pin) -> Result<(), Error> {
+pub fn release(bench: &mut Held<'_>, pin: Pin) -> Result<(), Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }

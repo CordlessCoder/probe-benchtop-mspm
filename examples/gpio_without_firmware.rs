@@ -22,7 +22,7 @@
 //! Pass a pin that is safe to drive on whatever board this runs on.
 use std::time::Duration;
 
-use probe_bench::{Attach, Bench, Target, Verify, mspm0_gpio};
+use probe_bench::{Attach, Bench, Held, Target, Verify, mspm0_gpio};
 
 /// `GPIOA`'s GPRCM, from the metapac: the block is at `+0x800` and `PWREN` at `+0x00`.
 ///
@@ -60,11 +60,11 @@ fn main() -> anyhow::Result<()> {
         !status.is_halted(),
         "the image is not running, so there is no control here"
     );
-    report(&mut bench, pin)?;
+    report(&mut bench.hold()?, pin)?;
 
     bench.reset_and_halt(Duration::from_secs(1))?;
     println!("\nhalted at the reset vector, nothing run");
-    report(&mut bench, pin)?;
+    report(&mut bench.hold()?, pin)?;
 
     // **`PWREN` alone, no reset.** Asserting a bank's reset is destructive on a part where an
     // application owns pins in it, so if powering is enough on its own then the fix costs one write
@@ -74,15 +74,15 @@ fn main() -> anyhow::Result<()> {
     // The registers behind `PWREN` stay isolated for a few ULPCLK cycles; a write inside that
     // window is dropped, which is the failure this whole example is about.
     std::thread::sleep(Duration::from_millis(1));
-    report(&mut bench, pin)?;
+    report(&mut bench.hold()?, pin)?;
 
-    let _ = mspm0_gpio::release(&mut bench, pin);
+    let _ = mspm0_gpio::release(&mut bench.hold()?, pin);
     bench.leave_halted();
     println!("\nleft halted. Reset or reflash to get the image running again.");
     Ok(())
 }
 
-fn report(bench: &mut Bench, pin: mspm0_gpio::Pin) -> anyhow::Result<()> {
+fn report(bench: &mut Held<'_>, pin: mspm0_gpio::Pin) -> anyhow::Result<()> {
     println!("  PWREN            {:#010x}", bench.read_u32(PWREN)?);
     let _ = mspm0_gpio::drive(bench, pin, true);
     let doe = bench.read_u32(DOE)?;

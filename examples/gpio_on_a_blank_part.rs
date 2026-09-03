@@ -69,7 +69,14 @@ fn main() -> anyhow::Result<()> {
     bench.reset_and_halt(Duration::from_secs(1))?;
     println!("halted at the reset vector");
 
-    let powered = mspm0_gpio::power_on(&mut bench)?;
+    // One hold across both, which is also what the module now asks for: every entry point here
+    // takes a held core, because taking it per call is three probe transactions each time.
+    let (powered, doe) = {
+        let mut held = bench.hold()?;
+        let powered = mspm0_gpio::power_on(&mut held)?;
+        mspm0_gpio::drive(&mut held, pin, true)?;
+        (powered, held.read_u32(DOE)?)
+    };
     println!(
         "GPIOA {}",
         if powered {
@@ -79,8 +86,6 @@ fn main() -> anyhow::Result<()> {
         }
     );
 
-    mspm0_gpio::drive(&mut bench, pin, true)?;
-    let doe = bench.read_u32(DOE)?;
     println!(
         "PA{} driven high: DOE {doe:#010x}, the bit {}",
         pin.0,
