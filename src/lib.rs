@@ -399,7 +399,7 @@ pub enum Error {
          stack overflow.{}",
         maybe(.chip),
         if *.needs_recovery {
-            " The access port is not answering and only the boot ROM's mass erase gets back in,              which destroys whatever the part holds — set `Attach::allow_erase_all` to let this              attach do it."
+            " The access port is not answering: only a mass erase gets back in, and it destroys what the part holds."
         } else {
             " Power-cycling the board and attaching under reset is the way in."
         }
@@ -561,17 +561,54 @@ fn maybe(chip: &Option<String>) -> String {
 /// it the refusal arrives as `MissingPermissions` rather than as anything mentioning the access
 /// port. Walked rather than matched at the top, because the refusal can arrive wrapped.
 fn refused_for_permission(error: &probe_rs::Error) -> bool {
-    if matches!(error, probe_rs::Error::MissingPermissions(_)) {
-        return true;
+    // **Two types spell this, and checking only one is why the first version missed it.**
+    // `probe_rs::Error::MissingPermissions` is the session's; `ArmError::MissingPermissions` is
+    // the architecture's, and a refused mass erase on MSPM0 arrives as the second inside the first.
+    fn refuses(error: &(dyn std::error::Error + 'static)) -> bool {
+        matches!(
+            error.downcast_ref::<probe_rs::Error>(),
+            Some(probe_rs::Error::MissingPermissions(_))
+        ) || matches!(
+            error.downcast_ref::<probe_rs::architecture::arm::ArmError>(),
+            Some(probe_rs::architecture::arm::ArmError::MissingPermissions(_))
+        )
     }
-    let mut source = std::error::Error::source(error);
-    while let Some(cause) = source {
-        if let Some(probe_rs::Error::MissingPermissions(_)) = cause.downcast_ref::<probe_rs::Error>() {
+
+    let mut at: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(cause) = at {
+        if refuses(cause) {
             return true;
         }
-        source = cause.source();
+        at = cause.source();
     }
     false
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use probe_rs::architecture::arm::ArmError;
+
+    /// **The shape a real refusal arrives in**, and the one the first version walked straight past:
+    /// the architecture's variant, not the session's.
+    #[test]
+    fn an_arm_permission_refusal_is_recognised() {
+        let refused = probe_rs::Error::Arm(ArmError::MissingPermissions("erase_all".to_owned()));
+        assert!(super::refused_for_permission(&refused));
+    }
+
+    /// The session's own variant, which is what was checked before and is still a refusal.
+    #[test]
+    fn a_session_permission_refusal_is_recognised() {
+        let refused = probe_rs::Error::MissingPermissions("erase_all".to_owned());
+        assert!(super::refused_for_permission(&refused));
+    }
+
+    /// **Anything else must not be**, which matters more than the two above: a false positive puts
+    /// a button that erases somebody's part in front of them when the part is fine.
+    #[test]
+    fn an_unrelated_failure_is_not() {
+        assert!(!super::refused_for_permission(&probe_rs::Error::Arm(ArmError::Timeout)));
+    }
 }
 
 pub(crate) fn acquire(session: &mut Session) -> Result<probe_rs::Core<'_>, Error> {
