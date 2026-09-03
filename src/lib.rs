@@ -152,6 +152,22 @@ impl<'a> Held<'a> {
         self.core.reset_and_halt(timeout)?;
         Ok(())
     }
+
+    /// What the core is doing. See [`Bench::status`].
+    ///
+    /// **Here so a caller with a hold does not have to reach through [`Held::core`].** That escape
+    /// hatch is documented as being for operations this API does not cover, and the core's own
+    /// status is not one of them — a consumer doing it by hand also has to map probe-rs's error
+    /// into this crate's, which is the part it is easy to get subtly different.
+    pub fn status(&mut self) -> Result<CoreStatus, Error> {
+        let _span = tracing::debug_span!("status").entered();
+        Ok(self.core.status()?)
+    }
+
+    /// Whether the core is executing or asleep. See [`Bench::is_live`].
+    pub fn is_live(&mut self) -> Result<bool, Error> {
+        Ok(matches!(self.status()?, CoreStatus::Running | CoreStatus::Sleeping))
+    }
 }
 
 impl Target for Held<'_> {
@@ -763,17 +779,18 @@ impl Bench {
     /// timing budget that is not an observation, it is an intervention. Use [`Bench::prove_running`]
     /// only when this is not enough.
     pub fn status(&mut self) -> Result<CoreStatus, Error> {
-        let _span = tracing::debug_span!("status").entered();
-        let mut core = acquire(&mut self.session)?;
-        Ok(core.status()?)
+        self.hold()?.status()
     }
 
     /// Whether the core is executing or asleep, as opposed to halted, locked up or unknown.
     ///
     /// `Sleeping` counts. A part that has entered a low-power mode between interrupts is working
     /// exactly as intended, and treating it as dead is the mistake this exists to prevent.
+    ///
+    /// **One acquisition, not two.** Written as `self.status()?` this took the core, dropped it and
+    /// took it again — six probe transactions to answer one question.
     pub fn is_live(&mut self) -> Result<bool, Error> {
-        Ok(matches!(self.status()?, CoreStatus::Running | CoreStatus::Sleeping))
+        self.hold()?.is_live()
     }
 
     /// Let a halted core run.
