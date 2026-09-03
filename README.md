@@ -78,9 +78,5 @@ wrong assumption.
 
 ## Status
 
-Used daily against Cortex-M0+ parts and shaped by that. The API is not stable, there is no release
-on crates.io, and `publish = false` says so.
-
-## Licence
-
-MIT or Apache-2.0, at your option.
+Used daily against Cortex-M0+ parts and shaped by that. The API is not stable, and this won't be released
+on crates.io.
