@@ -408,8 +408,8 @@ pub fn release(bench: &mut Held<'_>, pin: Pin) -> Result<(), Error> {
     }
     power_on(bench)?;
     bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
-    // `PC` clear is `PC_UNCONNECTED`, the state TI's own naming calls it, and it is where an
-    // analog net rests in. Pulls are cleared with it so nothing is left holding the node.
+    // `PC` clear is `PC_UNCONNECTED` in TI's own naming, and is where an analog net rests. Pulls
+    // are cleared with it so nothing is left holding the node.
     let pincm = bench.read_u32(pin.pincm())? & !(PC | INENA | PIPU | PIPD);
     bench.write_u32(pin.pincm(), pincm)
 }
