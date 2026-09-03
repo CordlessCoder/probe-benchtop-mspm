@@ -1105,8 +1105,8 @@ impl Bench {
     /// Flash erases by sector. `keep_unwritten_bytes` is set, so the sectors this touches are read
     /// back first and the bytes it does not write are put back as they were — which is what makes
     /// it safe to place a few words in a sector that holds something else. **It is not atomic**: a
-    /// failure between the erase and the restore leaves that sector partly written.
-    /// A caller that cares should check.
+    /// failure between the erase and the restore leaves that sector partly written, so read back
+    /// anything that has to be relied on afterwards.
     ///
     /// # The ELF still describes what it described
     ///
