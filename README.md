@@ -14,9 +14,11 @@ is most of what an embedded bench session is, and doing it over SWD costs nothin
 protocol, no framing, no command handler. The ELF's symbol table is the schema.
 
 ```rust
-use probe_bench::{Attach, Bench};
+use probe_bench::{Attach, Bench, Flashed, Target};
 
-let mut bench = Bench::attach(&Attach::default(), "firmware.elf".as_ref())?;
+// `chip` is the one field with no useful default.
+let attach = Attach { chip: "MSPM0L1306".to_owned(), ..Attach::default() };
+let mut bench = Bench::attach(&attach, "firmware.elf".as_ref())?;
 
 // A symbol is an address, and an address is a word.
 let before: u32 = bench.peek("blink_period_ms")?;
@@ -46,7 +48,7 @@ manuals, not inferred from a board.
 
 **The pin-to-`PINCM` mapping is the part that is not family-wide, and it is a table for a reason.**
 It equals the pin number plus one on 14 parts; on the other 29 the difference ranges from −27 to
-+28, and a second port continues the same numbering rather than restarting. So there is no
++78, and a second port continues the same numbering rather than restarting. So there is no
 arithmetic to be clever with, and a part the table does not know is an error rather than a guess —
 guessing would silently mux the wrong pad on two thirds of the family. `src/mspm0_parts.rs` is
 generated from the mspm0-data catalog by `tools/generate_iomux.py`.
