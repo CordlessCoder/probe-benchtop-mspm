@@ -982,7 +982,7 @@ dependencies = [
 [[package]]
 name = "probe-rs"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=faff6cfad8955bf9d1b8a4d452947ab27a8aec96#faff6cfad8955bf9d1b8a4d452947ab27a8aec96"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=0d38501cf37900708921f8f83682f2257f64ecd3#0d38501cf37900708921f8f83682f2257f64ecd3"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1015,7 +1015,7 @@ dependencies = [
 [[package]]
 name = "probe-rs-target"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=faff6cfad8955bf9d1b8a4d452947ab27a8aec96#faff6cfad8955bf9d1b8a4d452947ab27a8aec96"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=0d38501cf37900708921f8f83682f2257f64ecd3#0d38501cf37900708921f8f83682f2257f64ecd3"
 dependencies = [
  "base64 0.23.1",
  "bincode",
