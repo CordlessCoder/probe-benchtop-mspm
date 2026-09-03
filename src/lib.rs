@@ -227,35 +227,88 @@ impl Target for Held<'_> {
 /// the two are a pair rather than two independent switches.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FlashOptions {
-    /// Read the flash first, and skip the regions that already hold what is wanted.
+    /// Compare the image against the part first, and write nothing if it already matches.
     ///
-    /// Pays a full read to save erasing and programming whatever matched. Worth it when the part
-    /// probably already holds this image and not when it probably does not.
-    pub preverify: bool,
+    /// **On by default, because it does not change what a flash means.** The part still resets, so
+    /// it still comes up running this image from the start; the only difference is the time. And a
+    /// comparison that passed is stronger evidence the part holds the image than a write that
+    /// succeeded, because it read every byte that is actually there.
+    ///
+    /// Measured on a Cortex-M0+ with a 23 KB image: 0.57s against the 2.99s it replaces.
+    ///
+    /// This is what `probe-rs`'s CLI means by `--preverify`, and it is deliberately not that
+    /// crate's [`DownloadOptions::preverify`](probe_rs::flashing::DownloadOptions) — the flashing
+    /// library declares that field and reads it nowhere, so setting it changes nothing at all.
+    pub skip_if_unchanged: bool,
     /// Do not erase, because the part is already erased.
     ///
-    /// **The assumption is false the moment anything has been flashed**, so it is a claim about a
-    /// virgin part rather than a general speed-up. Wrong, it is caught by `verify` and by nothing
-    /// else.
-    pub skip_erase: bool,
-    /// Read everything back afterwards and compare it against what was asked for.
+    /// **A claim about the part, not a speed setting.** It is true of a part straight from the
+    /// vendor and false the moment anything has been written, so it does not survive the first
+    /// flash of a session. Worth 0.91s of the 2.99s when it holds.
+    ///
+    /// Wrong, it is caught by `verify` and by nothing else, which is why the two cannot be turned
+    /// off together — see [`FlashOptions::check`].
+    pub assume_erased: bool,
+    /// Read everything back afterwards and compare it against what was asked for. Worth 0.62s.
     pub verify: bool,
+    /// Erase the **whole** chip, not only the sectors this image occupies.
+    ///
+    /// **This destroys anything the part was keeping outside the image.** An ordinary flash erases
+    /// sector by sector and so leaves untouched whatever lives in sectors the ELF does not cover —
+    /// which is where an application that persists data across reflashes keeps it. This does not.
+    ///
+    /// It is offered because wiping that data is sometimes exactly the point: returning a part to
+    /// the state it left the vendor in. It is a destructive operation named for its effect, not a
+    /// faster erase that happens to have one, and a caller putting it in front of a person should
+    /// say what that person's part will lose.
+    ///
+    /// Implies a write: [`FlashOptions::skip_if_unchanged`] is ignored, because a part that
+    /// already holds the image still has the other sectors to erase.
+    pub whole_chip: bool,
 }
 
 impl Default for FlashOptions {
-    /// Verify, erase, and assume nothing about what is on the part.
+    /// Skip a write that would change nothing; otherwise erase, program and verify.
     fn default() -> Self {
         Self {
-            preverify: false,
-            skip_erase: false,
+            skip_if_unchanged: true,
+            assume_erased: false,
             verify: true,
+            whole_chip: false,
         }
     }
+}
+
+impl FlashOptions {
+    /// Refuse the one combination that corrupts without saying so.
+    ///
+    /// Flash cells only clear bits, so programming over content that was not erased produces
+    /// something that is neither the old image nor the new one. Read-back is the only thing that
+    /// turns that into a failed flash rather than a part quietly holding nonsense — so skipping
+    /// the erase and the verify together is not a faster flash, it is an unchecked one.
+    pub fn check(&self) -> Result<(), Error> {
+        if self.assume_erased && !self.verify {
+            return Err(Error::UncheckedFlash);
+        }
+        Ok(())
+    }
+}
+
+/// Whether a flash actually wrote anything.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Flashed {
+    /// The part did not hold this image, so it was erased and written.
+    Written,
+    /// The part already held it byte for byte, so nothing was written. It was still reset.
+    AlreadyThere,
 }
 
 /// Everything that can go wrong, named by what a user did rather than by what a layer returned.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("a flash that neither erases nor verifies would not be checked by anything")]
+    UncheckedFlash,
+
     #[error("cannot read {path}")]
     ElfRead {
         path: PathBuf,
@@ -921,7 +974,7 @@ impl Bench {
     /// Every written byte is read back and compared before this returns. A wrong image is otherwise
     /// silent for as long as it takes somebody to distrust a reading, and the read-back is a
     /// fraction of a second at the size a microcontroller image runs to.
-    pub fn program(&mut self, elf: &Path) -> Result<(), Error> {
+    pub fn program(&mut self, elf: &Path) -> Result<Flashed, Error> {
         self.program_watching(elf, |_| {})
     }
 
@@ -938,7 +991,7 @@ impl Bench {
     /// its own total. [`Progress::fraction`] is therefore the fraction of the *current* phase, and
     /// a caller that wants one number for the whole operation is choosing weights the algorithm
     /// did not supply.
-    pub fn program_watching(&mut self, elf: &Path, watch: impl FnMut(Progress)) -> Result<(), Error> {
+    pub fn program_watching(&mut self, elf: &Path, watch: impl FnMut(Progress)) -> Result<Flashed, Error> {
         self.program_with(elf, FlashOptions::default(), watch)
     }
 
@@ -952,9 +1005,20 @@ impl Bench {
         elf: &Path,
         options: FlashOptions,
         mut watch: impl FnMut(Progress),
-    ) -> Result<(), Error> {
+    ) -> Result<Flashed, Error> {
+        options.check()?;
         let symbols = Symbols::load(elf)?;
         let _span = tracing::debug_span!("program").entered();
+
+        // **Before anything is erased, ask whether anything needs to be.** Adopting the ELF and
+        // resetting still happen, so a caller cannot tell this apart from a write except by how
+        // long it took and by what this returns.
+        if options.skip_if_unchanged && !options.whole_chip && self.already_holds(elf)? {
+            self.symbols = symbols;
+            self.elf = elf.to_owned();
+            self.reset()?;
+            return Ok(Flashed::AlreadyThere);
+        }
 
         // Filled from the `AddProgressBar` events, which all arrive before any work starts.
         let mut totals: [Option<u64>; Phase::COUNT] = [None; Phase::COUNT];
@@ -962,8 +1026,11 @@ impl Bench {
 
         let mut download = probe_rs::flashing::DownloadOptions::default();
         download.verify = options.verify;
-        download.preverify = options.preverify;
-        download.skip_erase = options.skip_erase;
+        download.skip_erase = options.assume_erased;
+        download.do_chip_erase = options.whole_chip;
+        // `preverify` is deliberately left alone: the flashing library never reads it, so setting
+        // it would be a line that looks like it does something. `skip_if_unchanged` above is the
+        // behaviour its name promises, done here where it can be measured.
         download.progress = probe_rs::flashing::FlashProgress::new(move |event| {
             report(event, &mut totals, &mut done, &mut watch);
         });
@@ -981,7 +1048,8 @@ impl Bench {
         self.symbols = symbols;
         self.elf = elf.to_owned();
 
-        self.reset()
+        self.reset()?;
+        Ok(Flashed::Written)
     }
 
     /// Erase the chip's flash, and leave the core halted at a reset vector that holds nothing.
