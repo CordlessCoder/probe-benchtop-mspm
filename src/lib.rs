@@ -1016,7 +1016,8 @@ impl Bench {
     /// Take core 0.
     ///
     /// **Prefer this to [`Bench::session`] plus `core(0)`**, which reaches the same core without
-    /// being counted. See [`acquire`] for why the count is the number worth having.
+    /// being counted. Every acquisition opens a `core_acquire` span, which is the count a profile
+    /// reports and the number worth watching: taking the core costs three probe transactions.
     pub fn core(&mut self) -> Result<probe_rs::Core<'_>, Error> {
         acquire(&mut self.session)
     }
@@ -1095,6 +1096,16 @@ impl Target for Bench {
 
     fn write_u32(&mut self, address: u64, value: u32) -> Result<(), Error> {
         self.hold()?.write_u32(address, value)
+    }
+
+    /// **Overridden, because the default writes and reads under separate holds.**
+    ///
+    /// Every other method here is one hold, so the trait's default — `poke_unchecked` then `peek` —
+    /// silently costs two on this implementor where it costs one on [`Held`]. That is the hazard
+    /// this split has: a default method written against a held core is double-priced on `Bench`,
+    /// and nothing in the signature says so. One hold, both halves.
+    fn poke<T: Value>(&mut self, name: &str, value: T) -> Result<(), Error> {
+        self.hold()?.poke(name, value)
     }
 }
 

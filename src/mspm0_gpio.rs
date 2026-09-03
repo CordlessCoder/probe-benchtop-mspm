@@ -31,8 +31,8 @@
 //! **This is the hazard, and it cannot be designed away.** A pin the firmware also uses has two
 //! owners: its driver rewrites `DOUT`, `DOE` or the mux whenever it next touches that pin, and
 //! which of the two wins is a race. Driving a pin the firmware owns is for seeing what happens,
-//! not for holding a level. [`Pin::taken_by_firmware`] is the caller's to decide — this crate does
-//! not know what any firmware uses.
+//! not for holding a level. **Which pins a firmware owns is the caller's to know** — this crate has
+//! no way to find out, and does not try.
 //!
 //! # One refusal, and only one
 //!
@@ -186,10 +186,6 @@ pub fn read(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
     })
 }
 
-/// Read every port-A pin in one pass.
-///
-/// Four register reads rather than four per pin, which is what makes a pin table refreshable at a
-/// useful rate over SWD.
 /// Power the GPIO bank if it is not already, and say whether that had to be done.
 ///
 /// **Every entry point here calls this first**, because the failure it prevents is silent: an
@@ -212,6 +208,10 @@ pub fn power_on(bench: &mut impl Target) -> Result<bool, Error> {
     Ok(true)
 }
 
+/// Read every port-A pin in one pass.
+///
+/// Four register reads rather than four per pin, which is what makes a pin table refreshable at a
+/// useful rate over SWD.
 pub fn read_all(bench: &mut impl Target) -> Result<Vec<(Pin, State)>, Error> {
     let _span = tracing::debug_span!("gpio_read_all").entered();
     power_on(bench)?;
@@ -260,7 +260,7 @@ pub fn drive(bench: &mut impl Target, pin: Pin, level: bool) -> Result<State, Er
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
-    power_on(bench)?;
+    // `read` powers the bank, so this does not.
     let was = read(bench, pin)?;
 
     let set = if level { DOUTSET31_0 } else { DOUTCLR31_0 };
@@ -344,7 +344,7 @@ pub fn observe(bench: &mut impl Target, pin: Pin) -> Result<State, Error> {
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
-    power_on(bench)?;
+    // `read` powers the bank, so this does not.
     let was = read(bench, pin)?;
     bench.write_u32(pin.pincm(), pincm_observing(was.pincm))?;
     Ok(was)
@@ -363,7 +363,7 @@ pub fn input(bench: &mut impl Target, pin: Pin, pull: Pull) -> Result<State, Err
     if pin.is_debug() {
         return Err(Error::DebugPin { pin: pin.0 });
     }
-    power_on(bench)?;
+    // `read` powers the bank, so this does not.
     let was = read(bench, pin)?;
 
     // Off first: a pad that stops driving before it changes function never drives an unintended
@@ -377,7 +377,17 @@ pub fn input(bench: &mut impl Target, pin: Pin, pull: Pull) -> Result<State, Err
 /// Put a pin back exactly as `was` found it.
 ///
 /// The output driver goes off before the mux is restored, for the same reason it went on last.
+///
+/// **No caller in this workspace yet**, and it stays because [`observe`] and [`input`] are written
+/// as borrows — each says in its own documentation that this is what gives the pin back. A borrow
+/// with no return is a different API, and a narrower one.
 pub fn restore(bench: &mut impl Target, pin: Pin, was: &State) -> Result<(), Error> {
+    // **The guard the other mutators have and this one did not.** `State` is public with public
+    // fields, so a caller can hand this a pin it never read — and this is the one entry point that
+    // would then reconfigure `PA19` or `PA20` and take the debug port down mid-session.
+    if pin.is_debug() {
+        return Err(Error::DebugPin { pin: pin.0 });
+    }
     if !was.driving {
         power_on(bench)?;
         bench.write_u32(GPIOA + DOECLR31_0, pin.mask())?;
