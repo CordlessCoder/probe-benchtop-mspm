@@ -358,6 +358,13 @@ pub enum Error {
     #[error("no symbol named `{name}`{}", suggest(.near))]
     NoSuchSymbol { name: String, near: Vec<String> },
 
+    /// A symbol was asked for on a session that was opened without an ELF.
+    #[error(
+        "`{name}` was asked for, but this session was opened without an ELF, so it has no symbol \
+         table. Open it with `Bench::attach` and an image to read symbols"
+    )]
+    NoSymbolTable { name: String },
+
     /// The ELF says this symbol is a different width from the type asked for.
     ///
     /// Worth its own variant because the alternative is a silent partial write: poking a `u32` at
@@ -389,11 +396,23 @@ pub enum Error {
     #[error(
         "cannot attach{}\n\nOn MSPM0 a locked-up core takes its access port with it, so a fault \
          here may be the target rather than the probe: a faulting image, a blank main flash, or a \
-         stack overflow. Power-cycling the board and attaching under reset is the way in.",
-        maybe(.chip)
+         stack overflow.{}",
+        maybe(.chip),
+        if *.needs_recovery {
+            " The access port is not answering and only the boot ROM's mass erase gets back in,              which destroys whatever the part holds — set `Attach::allow_erase_all` to let this              attach do it."
+        } else {
+            " Power-cycling the board and attaching under reset is the way in."
+        }
     )]
     Attach {
         chip: Option<String>,
+        /// Whether the failure is the one a mass erase gets past.
+        ///
+        /// **Recorded here rather than left for a caller to sniff out of the message.** A front end
+        /// has to decide whether to offer recovery, and matching on prose is how that decision
+        /// rots. Set when probe-rs refused for want of the erase permission, which is what a part
+        /// with a dead access port looks like from outside.
+        needs_recovery: bool,
         #[source]
         source: probe_rs::Error,
     },
@@ -535,6 +554,26 @@ fn maybe(chip: &Option<String>) -> String {
 ///
 /// A free function on the session rather than a method on [`Bench`], so a caller may hold a
 /// borrow of the symbol table across it.
+/// Whether probe-rs refused an attach for want of the erase permission.
+///
+/// **The signature of a part whose access port is down.** probe-rs will recover such a part during
+/// the attach by running the boot ROM's mass erase, but only when the permission is given; without
+/// it the refusal arrives as `MissingPermissions` rather than as anything mentioning the access
+/// port. Walked rather than matched at the top, because the refusal can arrive wrapped.
+fn refused_for_permission(error: &probe_rs::Error) -> bool {
+    if matches!(error, probe_rs::Error::MissingPermissions(_)) {
+        return true;
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        if let Some(probe_rs::Error::MissingPermissions(_)) = cause.downcast_ref::<probe_rs::Error>() {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
 pub(crate) fn acquire(session: &mut Session) -> Result<probe_rs::Core<'_>, Error> {
     let _span = tracing::trace_span!("core_acquire").entered();
     Ok(session.core(0)?)
@@ -779,7 +818,8 @@ fn report(
 pub struct Bench {
     session: Session,
     symbols: Symbols,
-    elf: PathBuf,
+    /// `None` for a session opened without one — see [`Bench::attach_bare`].
+    elf: Option<PathBuf>,
     /// The chip name this was attached as, lowercased.
     ///
     /// **Kept because some device facts are per part and not derivable.** The `PINCM` a pin uses is
@@ -799,8 +839,31 @@ impl Bench {
     /// Note that attaching itself can halt a running core, depending on the probe and the debug
     /// sequence — [`Bench::status`] says whether it did and [`Bench::resume`] is the way back.
     pub fn attach(attach: &Attach, elf: &Path) -> Result<Self, Error> {
+        Self::open(attach, Some(elf))
+    }
+
+    /// Attach with no ELF, and therefore no symbol table.
+    ///
+    /// **For what a blank part can still answer.** Driving a pin, reading a status register or the
+    /// boot configuration needs no symbols, and requiring an image to do them means a part that has
+    /// just been erased cannot be reached at all — which is the state a bench most often wants to
+    /// get out of.
+    ///
+    /// Anything that resolves a symbol fails with [`Error::NoSymbolTable`] rather than looking like
+    /// a typo, and there is no image check to run.
+    ///
+    /// **A part whose access port is down still needs `Attach::allow_erase_all`**, which is
+    /// separate and destructive: this only removes the symbol requirement, not the recovery one.
+    pub fn attach_bare(attach: &Attach) -> Result<Self, Error> {
+        Self::open(attach, None)
+    }
+
+    fn open(attach: &Attach, elf: Option<&Path>) -> Result<Self, Error> {
         let _span = tracing::debug_span!("attach", chip = %attach.chip).entered();
-        let symbols = Symbols::load(elf)?;
+        let symbols = match elf {
+            Some(path) => Symbols::load(path)?,
+            None => Symbols::none(),
+        };
 
         let lister = Lister::new();
         let probe = match &attach.probe {
@@ -846,28 +909,46 @@ impl Bench {
             })
             .map_err(|source| Error::Attach {
                 chip: Some(attach.chip.clone()),
+                needs_recovery: !attach.allow_erase_all && refused_for_permission(&source),
                 source,
             })?;
 
         let mut bench = Self {
             session,
             symbols,
-            elf: elf.to_owned(),
+            elf: elf.map(Path::to_path_buf),
             chip: attach.chip.to_lowercase(),
             resume_on_drop: true,
         };
 
-        {
+        // **Nothing to check against when there is no image**, and the check is the only reason
+        // this would take the core at all.
+        if let Some(path) = elf {
             let mut core = acquire(&mut bench.session)?;
-            image::verify(&mut core, elf, attach.verify)?;
+            image::verify(&mut core, path, attach.verify)?;
         }
 
         Ok(bench)
     }
 
+    /// Whether a failed attach would get past its failure with `Attach::allow_erase_all`.
+    ///
+    /// **What a front end asks before offering to recover a part.** Only ever true for
+    /// [`Error::Attach`], and only when the permission was not already given.
+    #[must_use]
+    pub fn needs_recovery(error: &Error) -> bool {
+        matches!(
+            error,
+            Error::Attach {
+                needs_recovery: true,
+                ..
+            }
+        )
+    }
+
     /// The ELF this was attached with.
-    pub fn elf(&self) -> &Path {
-        &self.elf
+    pub fn elf(&self) -> Option<&Path> {
+        self.elf.as_deref()
     }
 
     /// The chip name this was attached as, lowercased.
@@ -1058,7 +1139,7 @@ impl Bench {
         // long it took and by what this returns.
         if options.skip_if_unchanged && !options.whole_chip && self.already_holds(elf)? {
             self.symbols = symbols;
-            self.elf = elf.to_owned();
+            self.elf = Some(elf.to_owned());
             self.reset()?;
             return Ok(Flashed::AlreadyThere);
         }
@@ -1089,7 +1170,7 @@ impl Bench {
         // Adopted only once the write succeeded. On the error path the old ELF stays, which is
         // wrong about the part — but so is every other answer, and the error says so.
         self.symbols = symbols;
-        self.elf = elf.to_owned();
+        self.elf = Some(elf.to_owned());
 
         self.reset()?;
         Ok(Flashed::Written)
@@ -1236,7 +1317,11 @@ impl Bench {
     /// come out of this struct, and a caller cannot borrow one while passing the other.
     pub fn logs(&mut self, channel: usize) -> Result<log::Reader, Error> {
         let _span = tracing::debug_span!("logs_attach").entered();
-        let elf = self.elf.clone();
+        // Decoding defmt needs the image's table, so this is one of the operations a bare session
+        // cannot do. Named as such rather than failing on an empty symbol lookup.
+        let elf = self.elf.clone().ok_or_else(|| Error::NoSymbolTable {
+            name: "the defmt table".to_owned(),
+        })?;
         let region = log::region(&self.symbols)?;
         log::Reader::attach(&mut self.session, region, &elf, channel)
     }

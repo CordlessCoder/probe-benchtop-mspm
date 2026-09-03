@@ -23,7 +23,7 @@
 //! access port is only reachable through the boot ROM's mass erase.
 use std::time::Duration;
 
-use probe_bench::{Attach, Target, Verify, mspm0_gpio};
+use probe_bench::{Attach, Target, mspm0_gpio};
 
 /// `GPIOA.DOE31_0`, which says whether the drive took.
 const DOE: u64 = 0x400A_12C0;
@@ -40,23 +40,20 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let erase = args.iter().any(|a| a == "--erase");
     let mut plain = args.iter().filter(|a| !a.starts_with("--"));
-    // **Only for its symbol table, which nothing here reads.** `Bench::attach` wants an ELF and this
-    // has no use for one — `Verify::Skip` means it is never compared against the part, and a blank
-    // part would fail any comparison anyway. Any ELF for this chip will do.
-    let elf = std::path::PathBuf::from(plain.next().expect("an ELF, for the API's sake"));
     let pin: u8 = plain.next().expect("a pin number").parse()?;
     let pin = mspm0_gpio::Pin(pin);
 
     let attach = Attach {
         chip: "MSPM0L1306".to_owned(),
         probe: std::env::var("PROBE_RS_PROBE").ok(),
-        // There is no image to check against, and after an erase there is nothing at all.
-        verify: Verify::Skip,
         // A blank part's access port answers only through the boot ROM's mass erase.
         allow_erase_all: true,
         ..Default::default()
     };
-    let mut bench = probe_bench::Bench::attach(&attach, &elf)?;
+    // **No ELF, because nothing here needs one.** Driving a pin is register arithmetic; the symbol
+    // table would go unread, and a blank part has no image to load one from anyway. This example
+    // used to take an ELF purely to satisfy the signature.
+    let mut bench = probe_bench::Bench::attach_bare(&attach)?;
 
     if erase {
         println!("erasing MAIN…");

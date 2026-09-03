@@ -63,8 +63,27 @@ impl Symbols {
         Ok(Self { by_name })
     }
 
+    /// No symbols at all, for a session opened without an ELF.
+    ///
+    /// **A blank part has no image to read symbols from**, and driving a pin or reading a status
+    /// register does not need any. This is what [`crate::Bench::attach_bare`] carries so those
+    /// operations can reach a part that a symbol-bearing attach could not.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            by_name: HashMap::new(),
+        }
+    }
+
     /// Look one up.
     pub fn get(&self, name: &str) -> Result<Symbol, Error> {
+        // **An empty table is a different mistake from a missing symbol**, and saying "no symbol
+        // named x" for it sends the reader looking for a typo in a name that was never going to be
+        // found. An ELF with no symbols at all is not a case worth separating: it fails the same
+        // way and for the same reason.
+        if self.by_name.is_empty() {
+            return Err(Error::NoSymbolTable { name: name.to_owned() });
+        }
         self.by_name.get(name).copied().ok_or_else(|| Error::NoSuchSymbol {
             name: name.to_owned(),
             near: self.nearest(name),
