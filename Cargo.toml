@@ -26,7 +26,7 @@ readme = "README.md"
 #
 # Pinned to a rev on `origin`, not to the local checkout by path: a path dependency would compile
 # whatever is in someone's working tree, which is not a thing two machines can agree on.
-probe-rs = { git = "https://github.com/CordlessCoder/probe-rs", rev = "3402189c079cdcba56e85b1547f057ee22935880" }
+probe-rs = { git = "https://github.com/CordlessCoder/probe-rs", rev = "c029e0a37dcc86f26a1a20e4e19f6e541f1d2fc2" }
 
 # The ELF's symbol table, read directly. probe-rs parses ELFs for flashing and for defmt, but it
 # does not expose a symbol lookup, and this is the whole schema — see the crate docs.
