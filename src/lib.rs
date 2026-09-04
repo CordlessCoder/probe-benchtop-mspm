@@ -583,23 +583,6 @@ fn maybe(chip: &Option<String>) -> String {
     chip.as_deref().map(|c| format!(" to {c}")).unwrap_or_default()
 }
 
-/// Take core 0, counting the acquisition.
-///
-/// **Every acquisition in this crate goes through here**, and it is a span rather than a plain call
-/// so that a profile counts them. On a wire-limited link the acquisition is the unit of cost, not
-/// the transfer: reading thirty-two registers one word at a time and reading them as one block move
-/// the same bytes, and differ by thirty-one acquisitions. So the count is the number worth watching
-/// while a caller is being made cheaper, and it is deterministic where a millisecond figure moves
-/// with the probe, the link speed and the host.
-///
-/// A free function on the session rather than a method on [`Bench`], so a caller may hold a
-/// borrow of the symbol table across it.
-/// Whether probe-rs refused an attach for want of the erase permission.
-///
-/// **The signature of a part whose access port is down.** probe-rs will recover such a part during
-/// the attach by running the boot ROM's mass erase, but only when the permission is given; without
-/// it the refusal arrives as `MissingPermissions` rather than as anything mentioning the access
-/// port. Walked rather than matched at the top, because the refusal can arrive wrapped.
 /// Whether a first pair of words could be the vector table of an image that could start.
 ///
 /// The core takes its initial stack pointer and program counter from the first two words, so an
@@ -640,6 +623,12 @@ mod vector_table_tests {
     }
 }
 
+/// Whether probe-rs refused an attach for want of the erase permission.
+///
+/// **The signature of a part whose access port is down.** probe-rs will recover such a part during
+/// the attach by running the boot ROM's mass erase, but only when the permission is given; without
+/// it the refusal arrives as `MissingPermissions` rather than as anything mentioning the access
+/// port. Walked rather than matched at the top, because the refusal can arrive wrapped.
 fn refused_for_permission(error: &probe_rs::Error) -> bool {
     // **Two types spell this, and checking only one is why the first version missed it.**
     // `probe_rs::Error::MissingPermissions` is the session's; `ArmError::MissingPermissions` is
@@ -691,6 +680,17 @@ mod recovery_tests {
     }
 }
 
+/// Take core 0, counting the acquisition.
+///
+/// **Every acquisition in this crate goes through here**, and it is a span rather than a plain call
+/// so that a profile counts them. On a wire-limited link the acquisition is the unit of cost, not
+/// the transfer: reading thirty-two registers one word at a time and reading them as one block move
+/// the same bytes, and differ by thirty-one acquisitions. So the count is the number worth watching
+/// while a caller is being made cheaper, and it is deterministic where a millisecond figure moves
+/// with the probe, the link speed and the host.
+///
+/// A free function on the session rather than a method on [`Bench`], so a caller may hold a
+/// borrow of the symbol table across it.
 pub(crate) fn acquire(session: &mut Session) -> Result<probe_rs::Core<'_>, Error> {
     let _span = tracing::trace_span!("core_acquire").entered();
     Ok(session.core(0)?)
@@ -1074,17 +1074,6 @@ impl Bench {
         &self.chip
     }
 
-    /// Whether the part already holds this image, byte for byte.
-    ///
-    /// **The cheap half of a flash, asked on its own.** A caller that reflashes the same build —
-    /// a bench rebuilding and pressing the button, a tool restoring a known image — can compare
-    /// first and skip the write when nothing has changed. That is what `probe-rs`'s own CLI does
-    /// for its `--preverify` switch, and it is not what
-    /// [`DownloadOptions::preverify`](probe_rs::flashing::DownloadOptions) does: the flashing
-    /// library declares that field and never reads it, so setting it changes nothing at all.
-    ///
-    /// An error here is a failure to *look*, not a mismatch — a part that holds something else
-    /// answers `Ok(false)`.
     /// Whether the part holds a runnable image at all.
     ///
     /// **Not the same question as [`Bench::already_holds`]**, which asks whether it holds *this*
@@ -1107,6 +1096,17 @@ impl Bench {
         Ok(is_vector_table(stack, entry))
     }
 
+    /// Whether the part already holds this image, byte for byte.
+    ///
+    /// **The cheap half of a flash, asked on its own.** A caller that reflashes the same build —
+    /// a bench rebuilding and pressing the button, a tool restoring a known image — can compare
+    /// first and skip the write when nothing has changed. That is what `probe-rs`'s own CLI does
+    /// for its `--preverify` switch, and it is not what
+    /// [`DownloadOptions::preverify`](probe_rs::flashing::DownloadOptions) does: the flashing
+    /// library declares that field and never reads it, so setting it changes nothing at all.
+    ///
+    /// An error here is a failure to *look*, not a mismatch — a part that holds something else
+    /// answers `Ok(false)`.
     pub fn already_holds(&mut self, elf: &Path) -> Result<bool, Error> {
         let _span = tracing::debug_span!("already_holds").entered();
         let mut core = acquire(&mut self.session)?;
