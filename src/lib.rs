@@ -84,6 +84,46 @@ pub trait Target {
     /// Write a word at a raw address.
     fn write_u32(&mut self, address: u64, value: u32) -> Result<(), Error>;
 
+    /// Read many four-byte symbols in as few transactions as their addresses allow.
+    ///
+    /// One entry per name, in the order asked, `None` where this image does not export the name or
+    /// where the symbol is not four bytes wide. A name that cannot be read is `None` rather than an
+    /// error, because a caller reading a list wants the other columns to keep working.
+    ///
+    /// **The grouping comes from the symbol table, not from a hard-coded map.** Addresses are
+    /// sorted, and a run is extended while the gap to the next symbol is small enough that spanning
+    /// it costs less than another round trip. A round trip is a fixed cost on a frame-bound probe
+    /// and the bytes in between are nearly free, so a modest gap is worth reading over — but only a
+    /// modest one, because a large hole may not be mapped at all.
+    ///
+    /// Symbols far from any other are read one at a time, which is what the old loop did for all of
+    /// them.
+    fn peek_many_u32(&mut self, names: &[&str]) -> Vec<Option<u32>> {
+        /// Bytes of gap worth reading over rather than paying for another transaction.
+        const SLACK: u64 = 64;
+        /// The most any one transfer covers, so a run cannot grow without bound.
+        const MAX_SPAN: u64 = 1024;
+
+        let _span = tracing::debug_span!("peek_many", count = names.len()).entered();
+
+        // Resolve first, keeping the caller's position so the answers can go back in order.
+        let mut wanted: Vec<(usize, u64)> = names
+            .iter()
+            .enumerate()
+            .filter_map(|(at, name)| {
+                let symbol = self.symbols().get(name).ok()?;
+                (symbol.size == 4).then_some((at, symbol.address))
+            })
+            .collect();
+        wanted.sort_unstable_by_key(|(_, address)| *address);
+
+        let mut out = vec![None; names.len()];
+        for run in runs(&wanted, SLACK, MAX_SPAN) {
+            read_run(self, run, &mut out);
+        }
+        out
+    }
+
     /// Whether a symbol is in this image at all.
     fn has(&self, name: &str) -> bool {
         self.symbols().get(name).is_ok()
@@ -1586,5 +1626,121 @@ mod tests {
             "two phases share a slot, so one overwrites the other's total"
         );
         assert!(seen.iter().all(|&i| i < Phase::COUNT), "a slot is outside the table");
+    }
+}
+
+/// Split symbols already sorted by address into runs worth reading as one transfer each.
+///
+/// A run grows while the gap to the next symbol is at most `slack` and the whole run stays within
+/// `max_span`. Pure, so the rule can be tested without a target.
+fn runs(sorted: &[(usize, u64)], slack: u64, max_span: u64) -> Vec<&[(usize, u64)]> {
+    let mut out = Vec::new();
+    let mut from = 0usize;
+    for i in 1..sorted.len() {
+        let (_, start) = sorted[from];
+        let (_, last) = sorted[i - 1];
+        let (_, next) = sorted[i];
+        let spans = next + 4 - start <= max_span;
+        let near = next.saturating_sub(last + 4) <= slack;
+        if !(spans && near) {
+            out.push(&sorted[from..i]);
+            from = i;
+        }
+    }
+    if !sorted.is_empty() {
+        out.push(&sorted[from..]);
+    }
+    out
+}
+
+/// Read one run, and place each word where its caller asked for it.
+///
+/// Split out because a closure here would borrow the target and the output at the same time. A run
+/// of one is a plain word read: spanning machinery for four bytes buys nothing.
+fn read_run<T: Target + ?Sized>(target: &mut T, run: &[(usize, u64)], out: &mut [Option<u32>]) {
+    let (Some((_, first)), Some((_, last))) = (run.first(), run.last()) else {
+        return;
+    };
+    if run.len() == 1 {
+        out[run[0].0] = target.read_u32(run[0].1).ok();
+        return;
+    }
+
+    let Ok(len) = usize::try_from(last + 4 - first) else {
+        return;
+    };
+    let mut bytes = vec![0u8; len];
+    if target.read_bytes(*first, &mut bytes).is_err() {
+        // **Fall back rather than lose the run.** One unreadable byte in the span would otherwise
+        // take every symbol in it, and a word that reads on its own still should.
+        for (at, address) in run {
+            out[*at] = target.read_u32(*address).ok();
+        }
+        return;
+    }
+    for (at, address) in run {
+        let Ok(offset) = usize::try_from(address - first) else {
+            continue;
+        };
+        if let Some(word) = bytes.get(offset..offset + 4) {
+            out[*at] = Some(u32::from_le_bytes([word[0], word[1], word[2], word[3]]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    use super::runs;
+
+    /// Symbols packed together are one transfer. This is the case the facility exists for: a watch
+    /// list is a handful of statics the linker put next to each other.
+    #[test]
+    fn adjacent_symbols_become_one_run() {
+        let sorted = [(0, 0x2000_0b58), (1, 0x2000_0b5c), (2, 0x2000_0b60)];
+        let out = runs(&sorted, 64, 1024);
+        assert_eq!(out.len(), 1, "three consecutive words are one transfer");
+        assert_eq!(out[0].len(), 3);
+    }
+
+    /// A gap wider than the slack is worth another round trip rather than reading over it. The
+    /// second address here is a megabyte away, which is the shape of a `.rodata` symbol sitting
+    /// among `.bss` ones.
+    #[test]
+    fn a_wide_gap_splits_the_run() {
+        let sorted = [(0, 0x2000_0b58), (1, 0x2000_0b5c), (2, 0x0000_742c)];
+        let mut sorted = sorted;
+        sorted.sort_unstable_by_key(|(_, address)| *address);
+        let out = runs(&sorted, 64, 1024);
+        assert_eq!(out.len(), 2, "the far symbol is read on its own");
+        assert_eq!(out[0].len(), 1, "and it sorts first, so it is the one alone");
+    }
+
+    /// A gap inside the slack is read over, because the bytes cost less than a transaction.
+    #[test]
+    fn a_narrow_gap_is_read_over() {
+        let sorted = [(0, 0x2000_0b58), (1, 0x2000_0b58 + 4 + 60)];
+        assert_eq!(runs(&sorted, 64, 1024).len(), 1, "60 bytes of gap is under the slack");
+
+        let wider = [(0, 0x2000_0b58), (1, 0x2000_0b58 + 4 + 65)];
+        assert_eq!(runs(&wider, 64, 1024).len(), 2, "65 is over it");
+    }
+
+    /// A run stops growing at the span cap however tightly packed it is, so one transfer cannot
+    /// grow past what a probe will carry.
+    #[test]
+    fn a_run_stops_at_the_span_cap() {
+        let sorted: Vec<(usize, u64)> = (0..400).map(|i| (i, 0x2000_0000 + i as u64 * 4)).collect();
+        let out = runs(&sorted, 64, 1024);
+        assert!(out.len() > 1, "1600 bytes cannot be one transfer under a 1024 cap");
+        for run in &out {
+            let span = run.last().unwrap().1 + 4 - run.first().unwrap().1;
+            assert!(span <= 1024, "a run spans {span} bytes, over the cap");
+        }
+    }
+
+    /// Nothing asked for is nothing read, rather than a panic on an empty slice.
+    #[test]
+    fn nothing_is_no_runs() {
+        assert!(runs(&[], 64, 1024).is_empty());
     }
 }
