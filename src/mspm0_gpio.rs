@@ -156,6 +156,23 @@ impl Pin {
     pub const fn is_debug(self) -> bool {
         self.port() == 0 && (self.index() == DEBUG_PINS[0] || self.index() == DEBUG_PINS[1])
     }
+
+    /// Refuse the two pins the session is running over.
+    ///
+    /// **The one place that sentence is written.** It was five copies of the same three lines, one
+    /// per entry point — and every one of them guards the same thing for the same reason: driving
+    /// `SWDIO` or `SWCLK` from here takes the session down with them, so the failure would arrive
+    /// as a dead probe rather than as a refusal.
+    ///
+    /// # Errors
+    ///
+    /// If this is one of them.
+    pub const fn refuse_if_debug(self) -> Result<(), Error> {
+        if self.is_debug() {
+            return Err(Error::DebugPin { pin: self.0 });
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Display for Pin {
@@ -338,9 +355,7 @@ pub fn read_all(bench: &mut Held<'_>) -> Result<Vec<(Pin, State)>, Error> {
 /// worth the microamps here: a driven pin reading back the opposite level is how contention with
 /// something external announces itself, and with the buffer off there is nothing to see.
 pub fn drive(bench: &mut Held<'_>, pin: Pin, level: bool) -> Result<State, Error> {
-    if pin.is_debug() {
-        return Err(Error::DebugPin { pin: pin.0 });
-    }
+    pin.refuse_if_debug()?;
     // `read` powers the bank, so this does not.
     let was = read(bench, pin)?;
 
@@ -422,9 +437,7 @@ const fn pincm_as_input(was: u32, pull: Pull) -> u32 {
 ///
 /// Pulls, the output driver and the mux are all left exactly as found.
 pub fn observe(bench: &mut Held<'_>, pin: Pin) -> Result<State, Error> {
-    if pin.is_debug() {
-        return Err(Error::DebugPin { pin: pin.0 });
-    }
+    pin.refuse_if_debug()?;
     // `read` powers the bank, so this does not.
     let was = read(bench, pin)?;
     bench.write_u32(pin.pincm(bench.chip())?, pincm_observing(was.pincm))?;
@@ -441,9 +454,7 @@ pub fn observe(bench: &mut Held<'_>, pin: Pin) -> Result<State, Error> {
 /// before the mux moves, so there is no instant at which this pad drives a level chosen by whatever
 /// was in `DOUT`. [`drive`] has to do it the other way round and says so.
 pub fn input(bench: &mut Held<'_>, pin: Pin, pull: Pull) -> Result<State, Error> {
-    if pin.is_debug() {
-        return Err(Error::DebugPin { pin: pin.0 });
-    }
+    pin.refuse_if_debug()?;
     // `read` powers the bank, so this does not.
     let was = read(bench, pin)?;
 
@@ -466,9 +477,7 @@ pub fn restore(bench: &mut Held<'_>, pin: Pin, was: &State) -> Result<(), Error>
     // **The guard the other mutators have and this one did not.** `State` is public with public
     // fields, so a caller can hand this a pin it never read — and this is the one entry point that
     // would then reconfigure `PA19` or `PA20` and take the debug port down mid-session.
-    if pin.is_debug() {
-        return Err(Error::DebugPin { pin: pin.0 });
-    }
+    pin.refuse_if_debug()?;
     if !was.driving {
         power_on(bench, pin)?;
         bench.write_u32(pin.gpio() + DOECLR31_0, pin.mask())?;
@@ -484,9 +493,7 @@ pub fn restore(bench: &mut Held<'_>, pin: Pin, was: &State) -> Result<(), Error>
 
 /// Stop driving a pin and leave it disconnected, which is where an unused net rests.
 pub fn release(bench: &mut Held<'_>, pin: Pin) -> Result<(), Error> {
-    if pin.is_debug() {
-        return Err(Error::DebugPin { pin: pin.0 });
-    }
+    pin.refuse_if_debug()?;
     power_on(bench, pin)?;
     bench.write_u32(pin.gpio() + DOECLR31_0, pin.mask())?;
     // `PC` clear is `PC_UNCONNECTED` in TI's own naming, and is where an analog net rests. Pulls
