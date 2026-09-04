@@ -117,6 +117,15 @@ mod reg {
     /// `SYSCTL.MCLKCFG`, whose `STOPCLKSTBY` picks between STANDBY0 and STANDBY1.
     pub const MCLKCFG: u64 = 0x400B_0104;
     pub const STOPCLKSTBY: u32 = 1 << 21;
+
+    /// The two above are read as one transfer, which only works while they are adjacent.
+    ///
+    /// **Here rather than in the reader**, because this is a fact about the addresses and it should
+    /// fail where they are written rather than where they are used.
+    const _: () = assert!(
+        MCLKCFG == SYSOSCCFG + 4,
+        "the sleep reader takes these two as one eight-byte read"
+    );
 }
 
 /// What the hardware says about sleeping, as against what the HAL would allow.
