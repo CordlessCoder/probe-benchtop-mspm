@@ -309,7 +309,7 @@ dependencies = [
  "defmt-json-schema",
  "defmt-parser",
  "dissimilar",
- "gimli",
+ "gimli 0.29.0",
  "log",
  "nom",
  "object 0.36.7",
@@ -480,6 +480,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40ecd4077b5ae9fd2e9e169b102c6c330d0605168eb0e8bf79952b256dbefffd"
 dependencies = [
  "fallible-iterator",
+ "stable_deref_trait",
+]
+
+[[package]]
+name = "gimli"
+version = "0.34.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1033caf0b349c518623b5396bfb2cf0bddf44f0306d543a250e5743297aafd10"
+dependencies = [
  "stable_deref_trait",
 ]
 
@@ -972,6 +981,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "defmt-decoder",
+ "gimli 0.34.0",
  "object 0.40.0",
  "probe-rs",
  "thiserror",

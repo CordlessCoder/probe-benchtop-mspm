@@ -38,6 +38,7 @@ use probe_rs::{MemoryInterface, Permissions, Session};
 
 pub mod embassy_mspm0;
 mod image;
+mod layout;
 pub mod log;
 pub mod mspm0_gpio;
 pub mod mspm0_mailbox;

@@ -3,6 +3,11 @@
 //! There is no protocol between host and target here, and no generated header kept in step by hand.
 //! A parameter is a `static` in the firmware; the harness looks its name up and writes it. The
 //! symbol table cannot drift from the image because it *is* the image.
+//!
+//! **Where the image carries debug information, the schema reaches inside a compound variable
+//! too.** A firmware that keeps its state in a module-level struct rather than in one scalar per
+//! reading is then addressable field by field, under a dotted name, without being rewritten to
+//! suit this harness. [`crate::layout`] has how, and the addresses still come from the table here.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -58,6 +63,29 @@ impl Symbols {
                     size: symbol.size(),
                 },
             );
+        }
+
+        // **The members are added under the table, never over it.** A synthesised `a.b` can only
+        // collide with a real symbol that already has a dot in its name, and where one does the
+        // linker's entry is the one that means something — so the real symbol wins and the walk
+        // loses a name nobody could have used anyway.
+        for (variable, leaves) in crate::layout::leaves_by_variable(&file) {
+            let Some(base) = by_name.get(&variable).copied() else {
+                continue;
+            };
+            for leaf in leaves {
+                // A member reaching past the end of what the linker recorded means the debug
+                // information and the symbol table disagree about this variable, and an address
+                // computed from the half that is wrong is a plausible number pointing at another
+                // variable. Dropping it is the only safe answer available here.
+                if base.size != 0 && leaf.offset + leaf.size > base.size {
+                    continue;
+                }
+                by_name.entry(format!("{variable}{}", leaf.suffix)).or_insert(Symbol {
+                    address: base.address + leaf.offset,
+                    size: leaf.size,
+                });
+            }
         }
 
         Ok(Self { by_name })
