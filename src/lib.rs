@@ -838,6 +838,42 @@ impl Progress {
     }
 }
 
+/// Every chip name this build of probe-rs will attach to.
+///
+/// **Package variants rather than variant names**, which is 6,791 names against 4,461. probe-rs
+/// resolves a chip by matching against package names, and every variant name is also a package
+/// name — so the difference is not that a shorter list would be wrong, it is that it leaves out
+/// the 2,330 names somebody reads off the part in front of them. `STM32C011F4Px` is offered here
+/// and is not a variant name.
+///
+/// Sorted and deduplicated, because two families can carry the same package name and a list a
+/// person scrolls is not the order a bincode blob happens to be in.
+///
+/// **Not [`probe_rs::config::Registry::search_chips`], and the difference matters to a front end
+/// offering a filter.** That is a prefix match, with a lowercase `x` standing for any single
+/// character — so `l1306` finds nothing and `MSPM0Lx306` finds `MSPM0L1306`. Useful at a command
+/// line where somebody types a part number from a datasheet; wrong as the filter behind a picker,
+/// where what is wanted is the whole list and a way to narrow it. Take the list here and filter it
+/// however the front end likes.
+///
+/// **It decodes the built-in target database**, so it is not free: about 6,800 names, and tens of
+/// milliseconds. Call it once and keep the answer.
+#[must_use]
+pub fn chips() -> Vec<String> {
+    let _span = tracing::debug_span!("chips").entered();
+    let registry = probe_rs::config::Registry::from_builtin_families();
+    let mut names: Vec<String> = registry
+        .families()
+        .iter()
+        .flat_map(|family| family.variants.iter())
+        .flat_map(probe_rs::config::Chip::package_variants)
+        .cloned()
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 /// One debug probe on the bus, as something a person can choose between.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ProbeChoice {
