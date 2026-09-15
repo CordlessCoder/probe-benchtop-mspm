@@ -16,13 +16,31 @@ use object::{Object, ObjectSymbol};
 
 use crate::Error;
 
-/// One symbol: where it lives and how big the linker says it is.
+/// One symbol: where it lives, how big the linker says it is, and which kind it is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Symbol {
     /// Target address, with the Thumb bit already cleared.
     pub address: u64,
     /// Size in bytes, from the ELF. Zero when the producer did not record one.
     pub size: u64,
+    /// Whether this names data, code, or something the ELF did not classify.
+    pub kind: Kind,
+}
+
+/// What a symbol names.
+///
+/// **This is what lets a host offer a firmware's watchable state without being told a prefix.**
+/// The alternative is a guess from the address — anything at or above the SRAM base is data — and
+/// that is wrong for a target whose RAM is somewhere else, and wrong again for a constant in
+/// flash that is worth reading.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// A variable. What a watch list is made of.
+    Data,
+    /// A function.
+    Code,
+    /// Neither, or not recorded. A section or file symbol, and some producers' notion of a label.
+    Other,
 }
 
 /// Every named symbol in an ELF, by name.
@@ -61,6 +79,11 @@ impl Symbols {
                 Symbol {
                     address: symbol.address() & !1,
                     size: symbol.size(),
+                    kind: match symbol.kind() {
+                        object::SymbolKind::Data => Kind::Data,
+                        object::SymbolKind::Text => Kind::Code,
+                        _ => Kind::Other,
+                    },
                 },
             );
         }
@@ -84,6 +107,8 @@ impl Symbols {
                 by_name.entry(format!("{variable}{}", leaf.suffix)).or_insert(Symbol {
                     address: base.address + leaf.offset,
                     size: leaf.size,
+                    // Data by construction: the walk emits scalar leaves and nothing else.
+                    kind: Kind::Data,
                 });
             }
         }
@@ -124,6 +149,23 @@ impl Symbols {
             .by_name
             .iter()
             .filter(|(name, _)| name.contains(needle))
+            .map(|(name, symbol)| (name.as_str(), *symbol))
+            .collect();
+        found.sort_by_key(|(name, _)| *name);
+        found
+    }
+
+    /// Every data symbol whose name contains `needle`, sorted.
+    ///
+    /// **An empty `needle` is the whole watchable surface**, which is what a firmware that was not
+    /// written for this harness offers: it has no prefix to filter on, and its state is whatever
+    /// its modules happen to keep. Code is excluded because a function's address is not something
+    /// a watch list can read a value from, and it would otherwise outnumber the variables.
+    pub fn data_containing(&self, needle: &str) -> Vec<(&str, Symbol)> {
+        let mut found: Vec<_> = self
+            .by_name
+            .iter()
+            .filter(|(name, symbol)| symbol.kind == Kind::Data && name.contains(needle))
             .map(|(name, symbol)| (name.as_str(), *symbol))
             .collect();
         found.sort_by_key(|(name, _)| *name);

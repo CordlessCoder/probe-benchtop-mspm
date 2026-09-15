@@ -100,3 +100,23 @@ fn no_member_runs_past_the_end_of_its_variable() {
         );
     }
 }
+
+/// A firmware with no prefix to filter on still offers its state, and offers only its state. This
+/// is the listing a host falls back to when it was not told what to look for.
+#[test]
+fn the_watchable_surface_is_data_and_only_data() {
+    let symbols = fixture();
+    let data = symbols.data_containing("");
+
+    let names: Vec<&str> = data.iter().map(|(name, _)| *name).collect();
+    assert!(names.contains(&"fixtureInstance"), "a compound variable is watchable");
+    assert!(names.contains(&"plainScalar"), "so is a scalar");
+    assert!(
+        names.contains(&"fixtureInstance.inner.pair.low"),
+        "and so is a synthesised member"
+    );
+
+    // `main` is in this image and is the thing the filter exists to keep out.
+    assert!(symbols.get("main").is_ok(), "the fixture does have a function");
+    assert!(!names.contains(&"main"), "code is not watchable state");
+}

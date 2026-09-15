@@ -47,7 +47,7 @@ mod symbols;
 mod value;
 
 pub use image::Verify;
-pub use symbols::{Symbol, Symbols};
+pub use symbols::{Kind, Symbol, Symbols};
 pub use value::Value;
 
 /// Read and write a running target, however the core was come by.
