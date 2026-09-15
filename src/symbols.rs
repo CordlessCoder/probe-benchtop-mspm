@@ -43,6 +43,14 @@ pub enum Kind {
     Other,
 }
 
+/// Whether a name belongs to the toolchain rather than to whoever wrote the firmware.
+///
+/// A leading `?` is reserved by IAR for compiler and assembler symbols, which is why its literal
+/// pools and anonymous constants all carry one. Nothing a person declared starts with it.
+fn is_reserved(name: &str) -> bool {
+    name.starts_with('?')
+}
+
 /// Every named symbol in an ELF, by name.
 pub struct Symbols {
     by_name: HashMap<String, Symbol>,
@@ -168,13 +176,21 @@ impl Symbols {
     /// width, so they are not watchable however they are classified, and admitting them buries the
     /// variables a person came to find.
     ///
+    /// **Compiler-reserved names go too**, for the same reason and by the same rule that already
+    /// drops ARM mapping symbols from the table: a leading `?` is reserved by one toolchain for its
+    /// own symbols, and its anonymous constants arrive under it in quantity.
+    ///
     /// The consequence to know about: a producer that records no sizes at all would offer nothing
-    /// here. [`Self::containing`] is the unfiltered view for that case.
+    /// here, and neither would one that begins its user symbols with a reserved character.
+    /// [`Self::containing`] is the unfiltered view for those cases, and every one of these symbols
+    /// is still resolvable by name through [`Self::get`] — this filters a listing, not the table.
     pub fn data_containing(&self, needle: &str) -> Vec<(&str, Symbol)> {
         let mut found: Vec<_> = self
             .by_name
             .iter()
-            .filter(|(name, symbol)| symbol.kind == Kind::Data && symbol.size != 0 && name.contains(needle))
+            .filter(|(name, symbol)| {
+                symbol.kind == Kind::Data && symbol.size != 0 && !is_reserved(name) && name.contains(needle)
+            })
             .map(|(name, symbol)| (name.as_str(), *symbol))
             .collect();
         found.sort_by_key(|(name, _)| *name);
