@@ -155,17 +155,26 @@ impl Symbols {
         found
     }
 
-    /// Every data symbol whose name contains `needle`, sorted.
+    /// Every data symbol of known size whose name contains `needle`, sorted.
     ///
     /// **An empty `needle` is the whole watchable surface**, which is what a firmware that was not
     /// written for this harness offers: it has no prefix to filter on, and its state is whatever
     /// its modules happen to keep. Code is excluded because a function's address is not something
     /// a watch list can read a value from, and it would otherwise outnumber the variables.
+    ///
+    /// **A size of zero is excluded for the same reason, and it is not a rare case.** A compiler
+    /// emits data symbols for its own literal pools, and at least one emits hundreds of them — all
+    /// classified as data, all of size zero, all named alike. Nothing can read a value of unknown
+    /// width, so they are not watchable however they are classified, and admitting them buries the
+    /// variables a person came to find.
+    ///
+    /// The consequence to know about: a producer that records no sizes at all would offer nothing
+    /// here. [`Self::containing`] is the unfiltered view for that case.
     pub fn data_containing(&self, needle: &str) -> Vec<(&str, Symbol)> {
         let mut found: Vec<_> = self
             .by_name
             .iter()
-            .filter(|(name, symbol)| symbol.kind == Kind::Data && name.contains(needle))
+            .filter(|(name, symbol)| symbol.kind == Kind::Data && symbol.size != 0 && name.contains(needle))
             .map(|(name, symbol)| (name.as_str(), *symbol))
             .collect();
         found.sort_by_key(|(name, _)| *name);
