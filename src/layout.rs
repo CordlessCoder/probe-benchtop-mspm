@@ -175,7 +175,7 @@ fn index(
                         }
                         gimli::DW_AT_type => node.type_ref = global_ref(&unit, attr.value()),
                         gimli::DW_AT_byte_size => node.byte_size = attr.udata_value(),
-                        gimli::DW_AT_data_member_location => node.location = member_offset(&attr),
+                        gimli::DW_AT_data_member_location => node.location = member_offset(attr),
                         gimli::DW_AT_bit_size => node.bit_size = true,
                         gimli::DW_AT_count => node.count = attr.udata_value(),
                         // An upper bound is inclusive, so the count is one more. A bound that is
