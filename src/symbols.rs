@@ -19,7 +19,11 @@ use crate::Error;
 /// One symbol: where it lives, how big the linker says it is, and which kind it is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Symbol {
-    /// Target address, with the Thumb bit already cleared.
+    /// Target address, ready to use.
+    ///
+    /// **The low bit is cleared for [`Kind::Code`] and kept for [`Kind::Data`]**, because it means
+    /// opposite things: on a function it is the Thumb flag, and on a variable it is part of the
+    /// address. A one-byte variable at an odd address is the case that separates them.
     pub address: u64,
     /// Size in bytes, from the ELF. Zero when the producer did not record one.
     pub size: u64,
@@ -78,20 +82,30 @@ impl Symbols {
             if name.starts_with('$') {
                 continue;
             }
+            let kind = match symbol.kind() {
+                object::SymbolKind::Data => Kind::Data,
+                object::SymbolKind::Text => Kind::Code,
+                _ => Kind::Other,
+            };
             // The Thumb bit is set on function symbols and is not part of the address. It is
             // cleared here rather than at every use, because a caller reading a `static` should
             // never have to think about it and a caller calling a function needs it set back —
             // which is that caller's business, and is documented where it arises.
+            //
+            // **Data keeps its low bit, because for data it is an address and not a flag.** A
+            // one-byte variable can sit at an odd address, and clearing the bit there resolves it
+            // to its neighbour — a plausible value read from the wrong place, and the same value
+            // for both variables. Nothing caught this for as long as every image in reach aligned
+            // what it published to four bytes.
             by_name.insert(
                 name.to_owned(),
                 Symbol {
-                    address: symbol.address() & !1,
-                    size: symbol.size(),
-                    kind: match symbol.kind() {
-                        object::SymbolKind::Data => Kind::Data,
-                        object::SymbolKind::Text => Kind::Code,
-                        _ => Kind::Other,
+                    address: match kind {
+                        Kind::Data => symbol.address(),
+                        Kind::Code | Kind::Other => symbol.address() & !1,
                     },
+                    size: symbol.size(),
+                    kind,
                 },
             );
         }
