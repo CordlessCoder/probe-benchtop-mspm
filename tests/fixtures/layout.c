@@ -22,7 +22,10 @@ int main(void) { return (int)fixtureInstance.after + (int)plainScalar; }
 /*
  * Built with:
  *   arm-none-eabi-gcc -mcpu=cortex-m0plus -mthumb -g -Os -nostdlib -nostartfiles \
- *     -Wl,-e,main -o layout-gcc.elf layout.c
+ *     -ffile-prefix-map=$(pwd)=. -Wl,-e,main -o layout-gcc.elf layout.c
+ *
+ * The prefix map is what keeps the builder's own directory out of the committed DWARF, which a
+ * published repository has no reason to carry.
  *
  * The ELF is committed beside this file so the test needs no cross-compiler. Rebuild it only to
  * change the shape, and update the offsets in tests/layout.rs when you do — they are the C
