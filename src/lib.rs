@@ -19,10 +19,11 @@
 //! # What is device-specific, and how much
 //!
 //! Attach, reset, symbols, peek and poke, and flashing are Cortex-M and probe-rs, and care about
-//! nothing below that. [`mspm0_gpio`] and [`mspm0_mailbox`] do: they drive real peripherals and are
-//! MSPM0-only. Both work across the family rather than on one part — with one exception, which is
-//! that a pin's `PINCM` register is a per-part table rather than arithmetic. [`mspm0_parts`] holds
-//! it, and a part it does not know is refused rather than guessed at.
+//! nothing below that. [`mspm0_gpio`], [`mspm0_mailbox`] and [`mspm0_flashctl`] do: they drive real
+//! peripherals and are MSPM0-only. All three work across the family rather than on one part, by
+//! way of two per-part tables: a pin's `PINCM` register, and which register protects a flash
+//! sector. [`mspm0_parts`] holds both, and a part they do not know is refused rather than guessed
+//! at.
 //!
 //! # No GUI dependency, ever
 //!
@@ -40,6 +41,7 @@ pub mod embassy_mspm0;
 mod image;
 mod layout;
 pub mod log;
+pub mod mspm0_flashctl;
 pub mod mspm0_gpio;
 pub mod mspm0_mailbox;
 pub mod mspm0_parts;
@@ -511,6 +513,34 @@ pub enum Error {
          and no further command could undo it — only a power cycle."
     )]
     DebugPin { pin: u8 },
+
+    /// The catalog has no flash geometry for this part, so which register protects a sector is
+    /// unknown.
+    #[error("no flash geometry for {chip}")]
+    NoFlashMap { chip: String },
+
+    #[error("{address:#010x} {reason}")]
+    FlashAddress { address: u32, reason: &'static str },
+
+    #[error("the flash controller refused {command} at {address:#010x}: {fault}")]
+    FlashCommand {
+        command: mspm0_flashctl::Command,
+        address: u32,
+        fault: mspm0_flashctl::Fault,
+    },
+
+    /// A controller command did not finish.
+    ///
+    /// **The core is left halted.** The controller may still own the flash bank, and the caches are
+    /// still off, so letting the core run could fetch wrong instructions. Reset the part.
+    #[error("the flash controller's {command} at {address:#010x} did not finish; the core is left halted")]
+    FlashTimeout {
+        command: mspm0_flashctl::Command,
+        address: u32,
+    },
+
+    #[error("an earlier flash command did not finish, so this controller takes no more")]
+    FlashWedged,
 
     /// A word is already waiting for the CPU.
     ///

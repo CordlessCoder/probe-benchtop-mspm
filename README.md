@@ -37,9 +37,9 @@ Which symbols exist, what they mean and what a sweep of one is for all belong in
 boundary is why it lives outside any firmware repository, and it is what lets more than one project
 use it.
 
-It does know about **MSPM0 silicon**. GPIO through `PINCM` and the application mailbox on SEC-AP
-live in their own modules; `CPUSS.CTL`, the SYSCTL power registers and the NONMAIN/BCR layout appear
-in examples. Nothing else depends on any of it.
+It does know about **MSPM0 silicon**. GPIO through `PINCM`, the application mailbox on SEC-AP and
+the flash controller live in their own modules; `CPUSS.CTL`, the SYSCTL power registers and the
+NONMAIN/BCR layout appear in examples. Nothing else depends on any of it.
 
 **How far that reaches, checked rather than assumed.** The GPIO block is at `0x400A_0000` plus
 `0x2000` per port on all 43 parts in the catalog, and DEBUGSS is access port 2 with the same
@@ -56,6 +56,11 @@ generated from the mspm0-data catalog by `tools/generate_iomux.py`.
 One value here really is one board's: the SEC-AP `IDR`. No reference manual states it, so it is a
 measurement rather than a constant, and it is used as an identity read rather than something to
 compare against.
+
+**The flash controller's write protection is a per-part table too.** Which register protects a
+sector, and how many sectors each bit covers, differs across the family, so
+`src/mspm0_parts/flash.rs` is generated from the same catalog by `tools/generate_flash.py`. The
+command sequence itself is the same everywhere. It has run on an MSPM0L1306 and nowhere else yet.
 
 ## Flashing
 
