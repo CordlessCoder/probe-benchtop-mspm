@@ -417,7 +417,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -992,7 +992,7 @@ dependencies = [
 [[package]]
 name = "probe-rs"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=c029e0a37dcc86f26a1a20e4e19f6e541f1d2fc2#c029e0a37dcc86f26a1a20e4e19f6e541f1d2fc2"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=e1c448a8de190d5b19bf56b00b5d1994bef46681#e1c448a8de190d5b19bf56b00b5d1994bef46681"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1025,7 +1025,7 @@ dependencies = [
 [[package]]
 name = "probe-rs-target"
 version = "0.32.0"
-source = "git+https://github.com/CordlessCoder/probe-rs?rev=c029e0a37dcc86f26a1a20e4e19f6e541f1d2fc2#c029e0a37dcc86f26a1a20e4e19f6e541f1d2fc2"
+source = "git+https://github.com/CordlessCoder/probe-rs?rev=e1c448a8de190d5b19bf56b00b5d1994bef46681#e1c448a8de190d5b19bf56b00b5d1994bef46681"
 dependencies = [
  "base64 0.23.1",
  "bincode",
@@ -1127,7 +1127,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
